@@ -9,9 +9,11 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 # --- CONFIGURATION ---
-with open('config.json', 'r') as f:
-    CONFIG = json.load(f)
+def load_config():
+    with open('../config.json', 'r') as f:
+        return json.load(f)
 
+CONFIG = load_config()
 SERVERS = CONFIG['servers']
 ADMIN_IDS = CONFIG['admin_ids']
 MAIN_MENU_KB = ReplyKeyboardMarkup([['အစသို့ပြန်သွားပါ']], resize_keyboard=True)
@@ -39,6 +41,61 @@ class XUIClient:
         except Exception as e:
             logging.error(f"Login failed: {e}")
         return False
+
+    def get_client_stats(self, target_uuid):
+        """Find a client by UUID and return stats (up, down, total, expiry)."""
+        # If no login cookies, login first
+        if not self.session.cookies:
+            self.login()
+
+        list_url = f"{self.base_url}/panel/api/inbounds/list"
+        try:
+            r = self.session.get(list_url, verify=False, timeout=10)
+            # If session expired (success: false or auth error), re-login and retry
+            if not r.json().get('success'):
+                logging.info(f"Session expired for {self.base_url}, re-logging in...")
+                self.login()
+                r = self.session.get(list_url, verify=False, timeout=10)
+            
+            if r.json().get('success'):
+                inbounds = r.json()['obj']
+                for inbound in inbounds:
+                    settings = json.loads(inbound['settings'])
+                    
+                    # 1. Find Client in Settings (Config)
+                    target_client = None
+                    for client in settings['clients']:
+                        if client['id'] == target_uuid:
+                            target_client = client
+                            break
+                    
+                    if target_client:
+                        # 2. Try to find REAL usage stats from 'clientStats' (dynamic)
+                        # X-UI often separates stats from config
+                        up = target_client.get('up', 0)
+                        down = target_client.get('down', 0)
+                        
+                        client_stats = inbound.get('clientStats')
+                        if client_stats:
+                            for stat in client_stats:
+                                # Match by Email (most reliable) or ID
+                                if stat.get('email') == target_client['email']:
+                                    up = stat.get('up', 0)
+                                    down = stat.get('down', 0)
+                                    break
+                        
+                        return {
+                            "email": target_client['email'],
+                            "up": up,
+                            "down": down,
+                            "total": target_client.get('totalGB', 0),
+                            "expiry": target_client.get('expiryTime', 0),
+                            "enable": target_client.get('enable', True)
+                        }
+            return None
+        except Exception as e:
+            logging.error(f"Error checking stats: {e}")
+            return None
 
     def add_client(self, email, limit_gb=0, expire_days=0):
         # Handle 'vless://' link in panel_url (sometimes passed mistakenly as panel_url)
@@ -149,6 +206,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🚀 Free စမ်းသုံးမယ် (24 Hours)", callback_data='get_free')],
         [InlineKeyboardButton("💎 1 လစာ (100Gb) ဝယ်ယူမယ်", callback_data='buy_premium')],
+        [InlineKeyboardButton("📊 Data လက်ကျန်စစ်မယ်", callback_data='check_quota')],
         [InlineKeyboardButton("❓ ဘယ်လိုသုံးရမလဲ", callback_data='help')]
     ]
     await update.message.reply_html(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -515,6 +573,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
+    elif query.data == 'check_quota':
+        msg = (
+            "📊 <b>Data လက်ကျန်စစ်ဆေးရန်</b>\n\n"
+            "လူကြီးမင်း၏ <b>VLESS Key</b> ကို ဤနေရာသို့ ပေးပို့လိုက်ပါ။\n\n"
+            "<i>(Key အစအဆုံး <code>vless://...</code> မှ စပြီး Copy ကူးထည့်ပါ)</i>"
+        )
+        keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]]
+        
+        # Force send new message (Avoid Edit conflicts)
+        await query.answer()
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=msg,
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
     elif query.data == 'main_menu':
         # Re-send the start message
         text = (
@@ -526,6 +602,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("🚀 Free စမ်းသုံးမယ် (24 Hours)", callback_data='get_free')],
             [InlineKeyboardButton("💎 1 လစာ (100Gb) ဝယ်ယူမယ်", callback_data='buy_premium')],
+            [InlineKeyboardButton("📊 Data လက်ကျန်စစ်မယ်", callback_data='check_quota')],
             [InlineKeyboardButton("❓ ဘယ်လိုသုံးရမလဲ", callback_data='help')]
         ]
         await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -627,12 +704,93 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("👑 <b>Admin Control Panel</b>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
     # Check for "Back to Start" button
-    if update.message.text == "အစသို့ပြန်သွားပါ":
+    if text == "အစသို့ပြန်သွားပါ":
         await start(update, context)
         return
 
-    # Check if adding a server
+    # Check for VLESS Key (Quota Check)
+    if text.startswith("vless://"):
+        try:
+            status_msg = await update.message.reply_text("🔍 <b>ရှာဖွေနေပါသည်...</b>", parse_mode='HTML')
+        except Exception as e:
+            logging.error(f"Reply failed: {e}")
+            return
+        
+        # Extract UUID
+        try:
+            # Format: vless://UUID@...
+            import re
+            match = re.search(r'vless://([a-f0-9\-]+)@', text)
+            if not match:
+                await status_msg.edit_text("❌ Key ပုံစံမှားယွင်းနေပါသည်။")
+                return
+            
+            target_uuid = match.group(1)
+            found = False
+            
+            # Scan all servers
+            for s in SERVERS:
+                try:
+                    # Just use simple timeout, no complex logic
+                    client = XUIClient(s)
+                    # We need to manually add get_client_stats here if it's missing in older cached version
+                    # But assuming XUIClient has it now
+                    stats = client.get_client_stats(target_uuid)
+                    
+                    if stats:
+                        found = True
+                        # Calculate Data
+                        total = stats['total']
+                        used = stats['up'] + stats['down']
+                        left = total - used
+                        
+                        # Helper for formatting bytes
+                        def sizeof_fmt(num, suffix="B"):
+                            for unit in ["", "Ki", "Mi", "Gi", "Ti"]:
+                                if abs(num) < 1024.0:
+                                    return f"{num:3.1f} {unit}{suffix}"
+                                num /= 1024.0
+                            return f"{num:.1f} Yi{suffix}"
+
+                        # Calculate Days
+                        import time
+                        from datetime import datetime
+                        if stats['expiry'] > 0:
+                            # Convert expiry timestamp (ms) to date
+                            expiry_ts = stats['expiry'] / 1000
+                            expiry_date = datetime.fromtimestamp(expiry_ts).strftime('%Y-%m-%d %H:%M')
+                            # User requested date ONLY
+                            days_str = expiry_date
+                        else:
+                            days_str = "Unlimited"
+
+                        msg = (
+                            f"📊 <b>အကောင့်အခြေအနေ</b>\n\n"
+                            f"👤 <b>Name:</b> {stats['email']}\n"
+                            f"🖥 <b>Server:</b> {s.get('name')}\n"
+                            f"🔋 <b>Status:</b> {'✅ Active' if stats['enable'] and days_str != 'Expired' else '❌ Disabled'}\n\n"
+                            f"📦 <b>Total:</b> {sizeof_fmt(total)}\n"
+                            f"📉 <b>Used:</b> {sizeof_fmt(used)}\n"
+                            f"📈 <b>Remaining:</b> {sizeof_fmt(left)}\n\n"
+                            f"⏳ <b>Expires:</b> {days_str}"
+                        )
+                        
+                        await status_msg.edit_text(msg, parse_mode='HTML')
+                        break # Stop searching
+                except Exception as e:
+                    logging.error(f"Error checking server {s.get('name')}: {e}")
+                    continue
+            
+            if not found:
+                await status_msg.edit_text("❌ Server ပေါ်တွင် ဤ Key ကိုမတွေ့ရှိပါ။")
+                
+        except Exception as e:
+            logging.error(f"Quota Check Error: {e}")
+            await status_msg.edit_text("❌ Error checking quota.")
+        return
     if context.user_data.get('gen_type') == 'add_server':
         raw = update.message.text
         try:
@@ -721,7 +879,7 @@ def main():
     # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CallbackQueryHandler(button_handler, pattern='^(get_|buy_|help|guide_|main_)'))
+    app.add_handler(CallbackQueryHandler(button_handler, pattern='^(get_|buy_|help|guide_|main_|check_)'))
     app.add_handler(CallbackQueryHandler(approval_handler, pattern='^(approve_|decline_)'))
     app.add_handler(CallbackQueryHandler(admin_handler, pattern='^admin_'))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))

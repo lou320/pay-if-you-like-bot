@@ -9,8 +9,13 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 # --- CONFIGURATION ---
-with open('config.json', 'r') as f:
-    CONFIG = json.load(f)
+def load_config():
+    with open('../config.json', 'r') as f:
+        return json.load(f)
+
+CONFIG = load_config()
+# Use specific admin token if available in root config, else legacy
+CONFIG['bot_token'] = CONFIG.get('admin_bot_token', '8408777363:AAGgMfiFZidu55AmeQTMtLLHU6xAuE7EY4g')
 
 SERVERS = CONFIG['servers']
 ADMIN_IDS = CONFIG['admin_ids']
@@ -187,24 +192,28 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith('toggle_srv_'):
         idx = int(query.data.split('_')[-1])
+        # Reload latest config before modify
+        CONFIG = load_config()
+        SERVERS = CONFIG['servers']
+        
         s = SERVERS[idx]
         current = s.get('enabled', True)
         s['enabled'] = not current
         SERVERS[idx] = s
         CONFIG['servers'] = SERVERS
-        with open('config.json', 'w') as f:
+        with open('../config.json', 'w') as f:
             json.dump(CONFIG, f, indent=4)
         
         # Refresh Menu
-        # Hacky redirect back to manage_srv_idx
         query.data = f'manage_srv_{idx}'
         await admin_handler(update, context)
         return
 
     elif query.data.startswith('set_def_'):
         idx = int(query.data.split('_')[-1])
+        CONFIG = load_config()
         CONFIG['default_server_id'] = idx
-        with open('config.json', 'w') as f:
+        with open('../config.json', 'w') as f:
             json.dump(CONFIG, f, indent=4)
         
         query.data = f'manage_srv_{idx}'
@@ -213,6 +222,8 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith('del_srv_'):
         idx = int(query.data.split('_')[-1])
+        CONFIG = load_config() # Reload
+        SERVERS = CONFIG['servers']
         s = SERVERS[idx]
         msg = f"⚠️ <b>Delete Server?</b>\n\nAre you sure you want to delete <b>{s.get('name')}</b>?\nThis cannot be undone."
         keyboard = [
@@ -224,6 +235,8 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith('confirm_del_'):
         idx = int(query.data.split('_')[-1])
+        CONFIG = load_config()
+        SERVERS = CONFIG['servers']
         if idx < len(SERVERS):
             deleted = SERVERS.pop(idx)
             CONFIG['servers'] = SERVERS
@@ -232,11 +245,10 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if CONFIG.get('default_server_id', 0) >= idx:
                 CONFIG['default_server_id'] = max(0, CONFIG.get('default_server_id', 0) - 1)
                 
-            with open('config.json', 'w') as f:
+            with open('../config.json', 'w') as f:
                 json.dump(CONFIG, f, indent=4)
             
             await query.edit_message_text(f"🗑 Deleted <b>{deleted.get('name')}</b>.", parse_mode='HTML')
-            # Return to main menu after short delay? Or just show Back button
             keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='admin_manage_menu')]]
             await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
         else:
