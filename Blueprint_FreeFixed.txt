@@ -1,0 +1,44 @@
+{
+  "center": 0.0,
+  "parts": [
+    {
+      "n": "Hawk Engine",
+      "p": { "x": 9.0, "y": 9.0 },
+      "o": { "x": 2.0, "y": 2.0, "z": 0.0 },
+      "t": "-Infinity",
+      "N": { "width_original": 0.0, "height_original": 0.0, "engine_on": false }
+    },
+    {
+      "n": "Fuel Tank",
+      "p": { "x": 9.0, "y": 14.0 },
+      "o": { "x": 1.0, "y": 1.0, "z": 0.0 },
+      "t": "-Infinity",
+      "N": { "width_original": 3.0, "height_original": 6.0, "fuel_percent": 100.0 }
+    },
+    {
+      "n": "Fairing",
+      "p": { "x": 9.0, "y": 15.0 },
+      "o": { "x": 1.0, "y": 1.0, "z": 0.0 },
+      "t": "-Infinity",
+      "N": { "width_original": 4.0, "width_a": 4.0, "width_b": 4.0, "height": 8.0 }
+    },
+    {
+      "n": "Capsule",
+      "p": { "x": 9.0, "y": 20.0 },
+      "o": { "x": 1.0, "y": 1.0, "z": 0.0 },
+      "t": "-Infinity",
+      "N": { "width_original": 0.0, "height_original": 0.0 }
+    },
+    {
+      "n": "Parachute",
+      "p": { "x": 9.0, "y": 21.0 },
+      "o": { "x": 1.0, "y": 1.0, "z": 0.0 },
+      "t": "-Infinity",
+      "N": { "width_original": 0.0, "height_original": 0.0 }
+    }
+  ],
+  "stages": [
+    { "partIndexes": [ 0 ] }
+  ],
+  "version": "1.5"
+}

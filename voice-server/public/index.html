@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rook Voice Prototype</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #000;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        #status { margin-bottom: 20px; color: #888; }
+        .mic-btn {
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            background: #ff3b30;
+            border: none;
+            color: white;
+            font-size: 40px;
+            cursor: pointer;
+            box-shadow: 0 0 20px rgba(255, 59, 48, 0.4);
+            transition: transform 0.1s;
+        }
+        .mic-btn:active { transform: scale(0.95); }
+        .mic-btn.listening { animation: pulse 1.5s infinite; background: #34c759; }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0.4); }
+            70% { box-shadow: 0 0 0 30px rgba(52, 199, 89, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0); }
+        }
+        #transcript { margin-top: 20px; font-size: 18px; text-align: center; max-width: 80%; }
+    </style>
+</head>
+<body>
+    <div id="status">Tap to Speak</div>
+    <button id="mic" class="mic-btn">🎙️</button>
+    <div id="transcript">...</div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        const micBtn = document.getElementById('mic');
+        const status = document.getElementById('status');
+        const transcriptDiv = document.getElementById('transcript');
+
+        // Speech Recognition Setup
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+            alert("Your browser doesn't support speech recognition. Try Chrome.");
+        }
+        const recognition = new SpeechRecognition();
+        recognition.lang = 'en-US';
+        recognition.continuous = false; // Stop after one sentence for turn-taking
+
+        // Speech Synthesis Setup
+        const synth = window.speechSynthesis;
+
+        micBtn.onclick = () => {
+            recognition.start();
+        };
+
+        recognition.onstart = () => {
+            micBtn.classList.add('listening');
+            status.innerText = "Listening...";
+        };
+
+        recognition.onend = () => {
+            micBtn.classList.remove('listening');
+            status.innerText = "Processing...";
+        };
+
+        recognition.onresult = (event) => {
+            const text = event.results[0][0].transcript;
+            transcriptDiv.innerText = `You: ${text}`;
+            socket.emit('voice_input', text);
+        };
+
+        socket.on('ai_reply', (text) => {
+            status.innerText = "Rook speaking...";
+            transcriptDiv.innerText = `Rook: ${text}`;
+            speak(text);
+        });
+
+        function speak(text) {
+            const utter = new SpeechSynthesisUtterance(text);
+            // Try to pick a decent voice
+            const voices = synth.getVoices();
+            const preferredVoice = voices.find(v => v.name.includes("Google US English")) || voices[0];
+            if (preferredVoice) utter.voice = preferredVoice;
+            
+            utter.onend = () => {
+                status.innerText = "Tap to reply";
+                // Optional: Auto-restart listening for "Continuous Mode"
+                // recognition.start(); 
+            };
+            synth.speak(utter);
+        }
+    </script>
+</body>
+</html>

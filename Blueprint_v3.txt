@@ -1,0 +1,30 @@
+{
+  "center": 0.0,
+  "parts": [
+    {
+      "n": "Capsule",
+      "p": { "x": 0.0, "y": 6.0 },
+      "o": { "x": 1.0, "y": 1.0, "z": 0.0 },
+      "t": "-Infinity",
+      "N": { "width_original": 0.0, "height_original": 0.0 }
+    },
+    {
+      "n": "Fuel Tank",
+      "p": { "x": 0.0, "y": 2.0 },
+      "o": { "x": 1.0, "y": 1.0, "z": 0.0 },
+      "t": "-Infinity",
+      "N": { "width_original": 2.0, "height_original": 4.0, "fuel_percent": 10.0 }
+    },
+    {
+      "n": "Hawk Engine",
+      "p": { "x": 0.0, "y": -2.0 },
+      "o": { "x": 1.0, "y": 1.0, "z": 0.0 },
+      "t": "-Infinity",
+      "N": { "width_original": 0.0, "height_original": 0.0, "engine_on": false }
+    }
+  ],
+  "stages": [
+    { "partIndexes": [ 2 ] }
+  ],
+  "version": "1.5"
+}
