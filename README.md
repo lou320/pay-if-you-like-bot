@@ -1,12 +1,13 @@
 # Pay If You Like - VPN Automation Bot 🤖🔐
 
-A full-stack Telegram bot solution for automating V2Ray/VLESS VPN service delivery. This system handles user management, key generation, payment verification via AI, and multi-server load balancing.
+A full-stack Telegram bot solution for automating V2Ray/VLESS VPN service delivery. This system handles user management, key generation, payment slip forwarding, and multi-server load balancing.
 
 ## 🚀 Features
 
-- **Instant Free Trials:** Auto-generates 24-hour ephemeral keys for users.
-- **AI Payment Verification:** Uses **Google Gemini 2.0 Flash** to scan and verify payment slips (KPay/Wave) automatically.
-- **Admin Approval System:** Forwards unverified slips to an admin channel with inline "Approve/Decline" controls.
+- **Instant Free Trials:** Auto-generates 24-hour ephemeral keys for users instantly.
+- **Fast Payment Approval:** Streamlined workflow forwarding slips to admins for 1-click "Approve/Decline".
+- **Automated Delivery:** Instant key generation and delivery immediately upon admin approval.
+- **Quota Management:** Users can check their remaining data and expiry date directly in the bot.
 - **Multi-Server Support:** Manages multiple X-UI panels (Singapore, Japan) with smart load balancing.
 - **VLESS-Reality Protocol:** Generates secure, censorship-resistant connection links.
 - **24/7 Persistence:** Runs as a systemd service for maximum uptime.
@@ -15,7 +16,6 @@ A full-stack Telegram bot solution for automating V2Ray/VLESS VPN service delive
 
 - **Language:** Python 3.11+
 - **Framework:** python-telegram-bot (Async)
-- **AI/Vision:** Google Generative AI (Gemini)
 - **VPN Backend:** X-UI Panel (V2Ray/Xray)
 - **Deployment:** Linux (Systemd, Bash)
 
