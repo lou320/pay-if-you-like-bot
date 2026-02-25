@@ -992,6 +992,52 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await status_msg.edit_text(f"❌ Error: {e}")
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle document uploads (payment slips sent as files)"""
+    user = update.message.from_user
+    
+    # Check if document is an image
+    if update.message.document.mime_type and 'image' in update.message.document.mime_type:
+        document_file = await update.message.document.get_file()
+        
+        # Notify user: pending check
+        await update.message.reply_text(
+            "⏳ <b>ငွေလွှဲပြေစာကို Admin သို့ ပေးပို့ထားပါသည်။</b>\n\n"
+            "Admin မှ စစ်ဆေးပြီးပါက Key အလိုအလျောက် ရောက်ရှိလာပါမည်။ ခေတ္တစောင့်ဆိုင်းပေးပါ။\n\n"
+            "Admin ကိုဆက်သွယ်ရန် နှိပ်ပါ 👇\n@payifyoulike",
+            parse_mode='HTML',
+            reply_markup=MAIN_MENU_KB
+        )
+
+        # Forward to Admins with Buttons
+        caption = (
+            f"📩 <b>New Payment Slip (File)!</b>\n\n"
+            f"👤 User: {user.full_name} (ID: <code>{user.id}</code>)\n"
+            f"🔗 <a href='tg://user?id={user.id}'>Chat with User</a>"
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f'approve_{user.id}'),
+                InlineKeyboardButton("❌ Decline", callback_data=f'decline_{user.id}')
+            ]
+        ]
+        
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_document(
+                    chat_id=admin_id,
+                    document=document_file.file_id,
+                    caption=caption,
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                logging.info(f"Sent document approval to admin {admin_id}")
+            except Exception as e:
+                logging.error(f"Failed to send document to admin {admin_id}: {e}")
+    else:
+        await update.message.reply_text("❌ Image files only, please. (PNG, JPG, etc.)")
+
 def main():
     app = Application.builder().token(CONFIG['bot_token']).build()
     
@@ -1002,6 +1048,7 @@ def main():
     app.add_handler(CallbackQueryHandler(approval_handler, pattern='^(approve_|decline_)'))
     app.add_handler(CallbackQueryHandler(admin_handler, pattern='^admin_'))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     # Centralized error handler
