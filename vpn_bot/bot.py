@@ -466,7 +466,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == 'get_free':
         # Show region selection
-        text = "🌍 <b>ကဖြစ်ပါသလဲ ရွေးချယ်ပေးပါခင်ဗျာ:</b>"
+        text = "🌍 <b>ကြိုက်နှစ်သက်ရာ Region ကိုရွေးချယ်ပေးပါခင်ဗျာ</b>"
         keyboard = [
             [InlineKeyboardButton("🇸🇬 Singapore", callback_data='region_free_singapore')],
             [InlineKeyboardButton("🇯🇵 Japan", callback_data='region_free_japan')],
@@ -631,12 +631,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
     elif query.data == 'buy_premium':
+        # Show region selection for premium
+        text = "🌍 <b>ကြိုက်နှစ်သက်ရာ Region ကိုရွေးချယ်ပေးပါခင်ဗျာ</b>"
+        keyboard = [
+            [InlineKeyboardButton("🇸🇬 Singapore", callback_data='region_premium_singapore')],
+            [InlineKeyboardButton("🇯🇵 Japan", callback_data='region_premium_japan')],
+            [InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]
+        ]
+        await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+    
+    elif query.data.startswith('region_premium_'):
+        region = query.data.split('_')[2]
+        context.user_data['selected_region'] = region
+        
         # Payment Instructions
         msg = (
-            "💎 <b>1လစာ ဝယ်ယူမည် (Auto)</b>\n\n"
+            f"💎 <b>1လစာ ဝယ်ယူမည် ({region.capitalize()})</b>\n\n"
             "အောက်ပါ KPay အကောင့်သို့ <b>5,000 Ks</b> လွှဲပေးပါ။\n\n"
             "📞 <b>09799881201</b> (Daw Tin Tin Yee)\n"
-            "📝 Note နေရာတွင် <code>Payment</code> လို့ပဲထည့်ပေးပါနော် တခြားဘာမှမထည့်ပါနဲ့ဗျ\n\n"
+            "📝 Note နေရာတွင် <code>Payment</code> လို့ပဲထည့်ပေးပါနော် တခြားဘာမှမထည့်ပါနဲ့ဗျ\n\n"
             "✅ <b>ငွေလွှဲပြီးပါက ငွေလွှဲပြေစာ (Slip) ဓာတ်ပုံကို ဒီ Bot သို့ ပို့ပေးပါ။</b>\n"
             "စစ်ဆေးပြီး ၁၀ စက္ကန့်အတွင်း Key ပို့ပေးပါမည်။"
         )
