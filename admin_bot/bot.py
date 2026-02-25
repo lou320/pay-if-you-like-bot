@@ -6,6 +6,7 @@ import string
 import requests
 import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import telegram
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 # --- CONFIGURATION ---
@@ -120,6 +121,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👑 <b>Admin Control Panel</b>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Ensure we modify the module-level config and servers
+    global CONFIG, SERVERS
+
     query = update.callback_query
     await query.answer()
     
@@ -328,6 +332,9 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start(update, context) # Reuse start logic
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Ensure we modify the module-level config and servers
+    global CONFIG, SERVERS
+
     # Check if adding a server
     if context.user_data.get('gen_type') == 'add_server':
         raw = update.message.text
@@ -369,7 +376,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             SERVERS.append(new_server)
             CONFIG['servers'] = SERVERS
-            with open('config.json', 'w') as f:
+            # Write back to parent config.json (root)
+            with open('../config.json', 'w') as f:
                 json.dump(CONFIG, f, indent=4)
             await update.message.reply_text("✅ Server Added Successfully!")
             context.user_data['gen_type'] = None
@@ -396,8 +404,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_server = SERVERS[server_idx] if server_idx < len(SERVERS) else SERVERS[0]
             
             client = XUIClient(target_server)
-            link = client.add_client(email=username, limit_gb=limit_gb, expire_days=days)
-            
+            result = client.add_client(email=username, limit_gb=limit_gb, expire_days=days)
+            if isinstance(result, tuple):
+                link, existed = result
+            else:
+                link = result
+                existed = False
+
             if link:
                 await status_msg.edit_text(
                     f"✅ <b>Key Generated!</b>\n\n"
@@ -408,6 +421,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"<code>{link}</code>",
                     parse_mode='HTML'
                 )
+                if existed:
+                    await status_msg.edit_text("⚠️ Note: Existing key returned (duplicate).")
             else:
                 await status_msg.edit_text("❌ Failed. Name might duplicate.")
         except Exception as e:
@@ -418,6 +433,19 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(admin_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    # Centralized error handler to log exceptions from handlers
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            logging.exception("Exception while handling an update", exc_info=context.error)
+        except Exception:
+            logging.exception("Exception in error handler")
+
+        # Provide helpful guidance for Conflict errors
+        err = getattr(context, 'error', None)
+        if err and isinstance(err, telegram.error.Conflict):
+            logging.error("Conflict: terminated by other getUpdates request; ensure only one bot instance is running or switch to webhooks.")
+
+    app.add_error_handler(error_handler)
     print("Admin Bot is running...")
     app.run_polling()
 

@@ -6,6 +6,7 @@ import string
 import requests
 import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+import telegram
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 # --- CONFIGURATION ---
@@ -18,7 +19,7 @@ SERVERS = CONFIG['servers']
 ADMIN_IDS = CONFIG['admin_ids']
 MAIN_MENU_KB = ReplyKeyboardMarkup([['အစသို့ပြန်သွားပါ']], resize_keyboard=True)
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG)
 
 # --- X-UI API CLIENT ---
 class XUIClient:
@@ -98,77 +99,152 @@ class XUIClient:
             return None
 
     def add_client(self, email, limit_gb=0, expire_days=0):
-        # Handle 'vless://' link in panel_url (sometimes passed mistakenly as panel_url)
+        # Validate panel URL
         if "vless://" in self.base_url:
             logging.error("Invalid Panel URL (vless link detected). Check config.json")
-            return None
+            return (None, False)
 
-        # Standard Logic
+        # Fetch inbound info (with retry on session expiration)
         list_url = f"{self.base_url}/panel/api/inbounds/get/{self.inbound_id}"
-        r = self.session.get(list_url, verify=False)
-        if not r.json().get('success'):
-            self.login() # Retry login
-            r = self.session.get(list_url, verify=False)
-        
-        inbound = r.json()['obj']
-        settings = json.loads(inbound['settings'])
-        stream_settings = json.loads(inbound['streamSettings'])
-        
-        # 2. Prepare new client
-        new_uuid = str(uuid.uuid4())
-        # Generate random subId (16 chars)
-        sub_id = ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(16))
-        
-        # Calculate expiry
+        try:
+            r = self.session.get(list_url, verify=False, timeout=15)
+            rj = r.json()
+        except Exception as e:
+            logging.error(f"Failed to GET inbound info: {e}")
+            return (None, False)
+
+        if not rj.get('success'):
+            logging.debug(f"Inbound GET success=false, response={rj}. Attempting re-login and retry.")
+            self.login()
+            try:
+                r = self.session.get(list_url, verify=False, timeout=15)
+                rj = r.json()
+            except Exception as e:
+                logging.error(f"Retry GET inbound failed: {e}")
+                return (None, False)
+
+        if not rj.get('success'):
+            logging.error(f"Inbound GET failed after retry: {rj}")
+            return (None, False)
+
+        inbound = rj.get('obj')
+        logging.debug(f"Inbound object keys: {inbound.keys() if isinstance(inbound, dict) else 'not a dict'}")
+
+        try:
+            settings = json.loads(inbound.get('settings', '{}'))
+        except Exception as e:
+            logging.error(f"Failed to parse inbound settings JSON: {e}")
+            settings = {'clients': []}
+
+        try:
+            stream_settings = json.loads(inbound.get('streamSettings', '{}'))
+        except Exception as e:
+            logging.error(f"Failed to parse inbound streamSettings JSON: {e}")
+            stream_settings = {}
+
         expiry_time = 0
         if expire_days > 0:
             import time
             expiry_time = int((time.time() * 1000) + (expire_days * 86400 * 1000))
 
-        client_data = {
-            "id": self.inbound_id,
-            "settings": json.dumps({
-                "clients": [{
-                    "id": new_uuid,
-                    "email": email,
-                    "flow": "xtls-rprx-vision", # Critical for Reality
-                    "totalGB": limit_gb * 1024 * 1024 * 1024,
-                    "expiryTime": expiry_time,
-                    "enable": True,
-                    "tgId": "",
-                    "subId": sub_id,
-                    "limitIp": 1
-                }]
-            })
-        }
-
-        # 3. Add Client API Call
         add_url = f"{self.base_url}/panel/api/inbounds/addClient"
-        r = self.session.post(add_url, json=client_data, verify=False)
-        
-        if r.json().get('success'):
-            # 4. Generate VLESS Link (Manual Construction for Reality)
-            # Typically: vless://uuid@ip:port?type=tcp&security=reality&pbk=...&fp=chrome&sni=...&sid=...&spx=%2F&flow=xtls-rprx-vision#Name
+
+        def build_link_for_uuid(uuid_val, remark_val):
+            """Construct a vless link from uuid, using Reality settings if available."""
+            try:
+                reality = stream_settings.get('realitySettings') if isinstance(stream_settings, dict) else None
+                rsettings = reality.get('settings') if reality else None
+                if isinstance(rsettings, str):
+                    try:
+                        rsettings = json.loads(rsettings)
+                    except Exception:
+                        rsettings = None
+
+                pbk = sni = sid = None
+                if isinstance(rsettings, dict):
+                    pbk = rsettings.get('publicKey')
+                if reality and reality.get('serverNames'):
+                    sni = reality.get('serverNames')[0]
+                if reality and reality.get('shortIds'):
+                    sid = reality.get('shortIds')[0]
+
+                ip = self.base_url.split('://')[1].split(':')[0]
+                port = inbound.get('port')
+
+                if pbk and sni and sid:
+                    return (f"vless://{uuid_val}@{ip}:{port}"
+                            f"?type=tcp&security=reality&pbk={pbk}&fp=chrome"
+                            f"&sni={sni}&sid={sid}&spx=%2F&flow=xtls-rprx-vision#{remark_val}")
+                else:
+                    # Fallback for ws or tcp without reality
+                    network = stream_settings.get('network') if isinstance(stream_settings, dict) else None
+                    if network == 'ws':
+                        ws = stream_settings.get('wsSettings') or {}
+                        path = ws.get('path', '/')
+                        headers = ws.get('headers') or {}
+                        host = headers.get('Host') or None
+                        params = f"type=ws&security=none&path={path}"
+                        if host:
+                            params += f"&host={host}"
+                    else:
+                        params = "type=tcp&security=none"
+                    return f"vless://{uuid_val}@{ip}:{port}?{params}#{remark_val}"
+            except Exception as e:
+                logging.error(f"Failed to build link: {e}")
+                return None
+
+        # Try adding the client
+        try:
+            new_uuid = str(uuid.uuid4())
+            sub_id = ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(16))
             
-            # Extract Reality Configs
-            reality = stream_settings['realitySettings']
-            pbk = reality['settings']['publicKey']
-            sni = reality['serverNames'][0]
-            sid = reality['shortIds'][0]
-            
-            # Construct Link
-            remark = email
-            ip = self.base_url.split('://')[1].split(':')[0]
-            port = inbound['port']
-            
-            link = (f"vless://{new_uuid}@{ip}:{port}"
-                    f"?type=tcp&security=reality&pbk={pbk}&fp=chrome"
-                    f"&sni={sni}&sid={sid}&spx=%2F&flow=xtls-rprx-vision#{remark}")
-            
-            return link
-        else:
-            logging.error(f"Failed to add client: {r.text}")
-            return None
+            client_data = {
+                "id": self.inbound_id,
+                "settings": json.dumps({
+                    "clients": [{
+                        "id": new_uuid,
+                        "email": email,
+                        "flow": "xtls-rprx-vision",
+                        "totalGB": limit_gb * 1024 * 1024 * 1024,
+                        "expiryTime": expiry_time,
+                        "enable": True,
+                        "tgId": "",
+                        "subId": sub_id,
+                        "limitIp": 1
+                    }]
+                })
+            }
+
+            r = self.session.post(add_url, json=client_data, verify=False, timeout=15)
+            logging.debug(f"addClient POST {add_url} email={email} returned status={r.status_code}")
+
+            try:
+                resp_json = r.json()
+            except Exception as e:
+                logging.error(f"addClient response is not JSON: {r.text[:200]}")
+                return (None, False)
+
+            if resp_json and resp_json.get('success'):
+                link = build_link_for_uuid(new_uuid, email)
+                return (link, False) if link else (None, False)
+
+            # Check for duplicate email
+            if resp_json and not resp_json.get('success') and 'duplicate' in str(resp_json.get('msg', '')).lower():
+                logging.info(f"Duplicate email detected for {email}, searching for existing client...")
+                for c in settings.get('clients', []):
+                    if c.get('email') == email:
+                        existing_uuid = c.get('id')
+                        link = build_link_for_uuid(existing_uuid, email)
+                        if link:
+                            logging.info(f"Found existing client for {email}, returning existing link")
+                            return (link, True)
+                return (None, False)
+
+            logging.error(f"Failed to add client: response={resp_json}")
+            return (None, False)
+        except Exception as e:
+            logging.error(f"Exception in add_client: {e}")
+            return (None, False)
 
 from datetime import datetime, timedelta
 import re
@@ -252,6 +328,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logging.error(f"Failed to send to admin {admin_id}: {e}")
 
 async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global CONFIG, SERVERS
     query = update.callback_query
     await query.answer()
     
@@ -310,7 +387,12 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             client = XUIClient(target_server)
             username = f"Premium_{user_id}_{secrets.token_hex(2)}"
-            link = client.add_client(email=username, limit_gb=100, expire_days=30)
+            result = client.add_client(email=username, limit_gb=100, expire_days=30)
+            if isinstance(result, tuple):
+                link, existed = result
+            else:
+                link = result
+                existed = False
             
             if link:
                 # Send to User (1. Info)
@@ -331,6 +413,12 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=f"<code>{link}</code>",
                     parse_mode='HTML'
                 )
+                if existed:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text="⚠️ You already have an existing key; a new key cannot be issued.",
+                        parse_mode='HTML'
+                    )
                 await context.bot.send_message(
                     chat_id=user_id,
                     text="👆 <b>Key ကို Copy ယူပါ။</b>\n\nအသုံးပြုနည်းကြည့်ရန် /start ကိုနှိပ်ပြီး\n'❓ ဘယ်လိုသုံးရမလဲ' ကို ရွေးပါ။",
@@ -437,9 +525,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             username = f"FreeTrial_{query.from_user.id}"
             
             # Create Key (2GB Limit, 1 Day)
-            link = client.add_client(email=username, limit_gb=2, expire_days=1)
+            result = client.add_client(email=username, limit_gb=2, expire_days=1)
+            if isinstance(result, tuple):
+                link, existed = result
+            else:
+                link = result
+                existed = False
             
             if link:
+                if existed:
+                    # User already has a free trial
+                    if user_id not in claimed:
+                        claimed[user_id] = link
+                        with open('claimed_users.json', 'w') as f:
+                            json.dump(claimed, f)
+
+                    await query.edit_message_text(
+                        "⚠️ <b>လူကြီးမင်းသည် အရင်ကပဲ Free Trial ရယူထားပြီးပါပြီ။</b>\n\n"
+                        "❗️ မကြာခဏ Free Trial ထပ်မံပေးမည်မဟုတ်ပါ။\n"
+                        "👇 <b>လူကြီးမင်း၏ ရှိပြီးသား Key:</b>",
+                        parse_mode='HTML'
+                    )
+                    await context.bot.send_message(chat_id=query.message.chat_id, text=f"`{link}`", parse_mode='MarkdownV2')
+                    return
+
+                # New key issued
                 claimed[user_id] = link
                 with open('claimed_users.json', 'w') as f:
                     json.dump(claimed, f)
@@ -624,6 +734,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👑 <b>Admin Control Panel</b>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global CONFIG, SERVERS
     query = update.callback_query
     await query.answer()
     
@@ -704,6 +815,7 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("👑 <b>Admin Control Panel</b>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global CONFIG, SERVERS
     text = update.message.text.strip()
 
     # Check for "Back to Start" button
@@ -821,7 +933,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Save to config.json
             CONFIG['servers'] = SERVERS
-            with open('config.json', 'w') as f:
+            with open('../config.json', 'w') as f:
                 json.dump(CONFIG, f, indent=4)
                 
             await update.message.reply_text(
@@ -856,18 +968,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_server = SERVERS[server_idx] if server_idx < len(SERVERS) else SERVERS[0]
             
             client = XUIClient(target_server)
-            link = client.add_client(email=username, limit_gb=limit_gb, expire_days=days)
+            result = client.add_client(email=username, limit_gb=limit_gb, expire_days=days)
+            if isinstance(result, tuple):
+                link, existed = result
+            else:
+                link = result
+                existed = False
             
             if link:
-                await status_msg.edit_text(
+                msg = (
                     f"✅ <b>Key Generated!</b>\n\n"
                     f"Server: {target_server.get('name')}\n"
                     f"Name: {username}\n"
                     f"Limit: {limit_gb} GB\n"
                     f"Days: {days}\n\n"
-                    f"<code>{link}</code>",
-                    parse_mode='HTML'
+                    f"<code>{link}</code>"
                 )
+                if existed:
+                    msg += "\n\n⚠️ Note: Existing key returned (duplicate)."
+                await status_msg.edit_text(msg, parse_mode='HTML')
             else:
                 await status_msg.edit_text("❌ Failed. Name might duplicate.")
         except Exception as e:
@@ -884,6 +1003,19 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_handler, pattern='^admin_'))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    # Centralized error handler
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            logging.exception("Exception while handling an update", exc_info=context.error)
+        except Exception:
+            logging.exception("Exception in error handler")
+
+        err = getattr(context, 'error', None)
+        if err and isinstance(err, telegram.error.Conflict):
+            logging.error("Conflict: terminated by other getUpdates request; ensure only one bot instance is running or switch to webhooks.")
+
+    app.add_error_handler(error_handler)
     
     print("Bot is running...")
     app.run_polling()
