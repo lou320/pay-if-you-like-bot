@@ -9,6 +9,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 import telegram
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
+# Setup logging FIRST
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG)
+
 # --- CONFIGURATION ---
 def load_config():
     with open('../config.json', 'r') as f:
@@ -17,6 +20,9 @@ def load_config():
 CONFIG = load_config()
 SERVERS = CONFIG['servers']
 ADMIN_IDS = CONFIG['admin_ids']
+logging.info(f"Configuration loaded: {len(SERVERS)} servers, {len(ADMIN_IDS)} admins")
+for s in SERVERS:
+    logging.debug(f"  Server: {s.get('name')} (region={s.get('region')})")
 MAIN_MENU_KB = ReplyKeyboardMarkup([['အစသို့ပြန်သွားပါ']], resize_keyboard=True)
 
 
@@ -32,8 +38,6 @@ def get_random_server_by_region(region):
         return None
     import random
     return random.choice(servers)
-
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG)
 
 # --- X-UI API CLIENT ---
 class XUIClient:
@@ -477,7 +481,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data.startswith('region_free_'):
         region = query.data.split('_')[2]
+        if context.user_data is None:
+            context.user_data = {}
         context.user_data['selected_region'] = region
+        logging.info(f"User {query.from_user.id} selected region: {region}")
+        logging.debug(f"Available regions: {[s.get('region') for s in SERVERS]}")
         
         # Check if user already has a key (simple tracking via file for now)
         try:
@@ -525,6 +533,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get selected region from user context
         region = context.user_data.get('selected_region', 'singapore')
         region_servers = get_servers_by_region(region)
+        logging.info(f"Region: {region}, Found servers: {len(region_servers)}, Server list: {[s.get('name') for s in region_servers]}")
         
         if not region_servers:
             await query.edit_message_text(
@@ -643,6 +652,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif query.data.startswith('region_premium_'):
         region = query.data.split('_')[2]
+        if context.user_data is None:
+            context.user_data = {}
         context.user_data['selected_region'] = region
         
         # Payment Instructions
