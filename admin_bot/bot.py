@@ -15,8 +15,14 @@ def load_config():
         return json.load(f)
 
 CONFIG = load_config()
-# Use specific admin token if available in root config, else legacy
-CONFIG['bot_token'] = CONFIG.get('admin_bot_token', '8408777363:AAGgMfiFZidu55AmeQTMtLLHU6xAuE7EY4g')
+# The admin bot uses its own token stored under `admin_bot_token` in the
+# parent config file.  Previously we were overwriting `CONFIG['bot_token']`
+# with this value on startup, which meant that any time the admin endpoint
+# wrote the JSON back (add server, toggle, etc.) the customer bot token
+# would be replaced by the admin token.  When both processes then polled
+# Telegram with the same token we got a 409 Conflict error.  Keep the
+# customer token untouched and keep the admin token in a separate variable.
+ADMIN_TOKEN = CONFIG.get('admin_bot_token', '8408777363:AAGgMfiFZidu55AmeQTMtLLHU6xAuE7EY4g')
 
 SERVERS = CONFIG['servers']
 ADMIN_IDS = CONFIG['admin_ids']
@@ -365,20 +371,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not url.startswith("http"):
                 url = "https://" + url
 
-            new_server = {
-                "name": f"Server {len(SERVERS)+1}",
-                "panel_url": url.strip(),
-                "username": user.strip(),
-                "password": pwd.strip(),
-                "inbound_id": int(str(iid).strip()),
-                "flow_limit_gb": 100,
-                "expire_days": 30
-            }
-            SERVERS.append(new_server)
-            CONFIG['servers'] = SERVERS
-            # Write back to parent config.json (root)
-            with open('../config.json', 'w') as f:
-                json.dump(CONFIG, f, indent=4)
+                new_server = {
+                    "name": f"Server {len(SERVERS)+1}",
+                    "panel_url": url.strip(),
+                    "username": user.strip(),
+                    "password": pwd.strip(),
+                    "inbound_id": int(str(iid).strip()),
+                    "flow_limit_gb": 100,
+                    "expire_days": 30
+                }
+                # Reload the config just before writing to ensure we don't persist any
+                # accidental in‑memory changes (e.g. bot_token hacks from startup).
+                CONFIG = load_config()
+                SERVERS = CONFIG.get('servers', [])
+                SERVERS.append(new_server)
+                CONFIG['servers'] = SERVERS
+                # Write back to parent config.json (root)
+                with open('../config.json', 'w') as f:
+                    json.dump(CONFIG, f, indent=4)
             await update.message.reply_text("✅ Server Added Successfully!")
             context.user_data['gen_type'] = None
             return
@@ -429,7 +439,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text(f"❌ Error: {e}")
 
 def main():
-    app = Application.builder().token(CONFIG['bot_token']).build()
+    # use the explicit admin token, not whatever `bot_token` happens to be in
+    # the JSON file.
+    app = Application.builder().token(ADMIN_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(admin_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
