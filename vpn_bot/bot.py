@@ -264,8 +264,184 @@ class XUIClient:
             logging.error(f"Exception in add_client: {e}")
             return (None, False)
 
+    def delete_client_by_email(self, email):
+        """Delete a client from the inbound by email address."""
+        try:
+            list_url = f"{self.base_url}/panel/api/inbounds/get/{self.inbound_id}"
+            r = self.session.get(list_url, verify=False, timeout=15)
+            rj = r.json()
+            
+            if not rj.get('success'):
+                logging.debug(f"Session expired, re-logging in for delete operation...")
+                self.login()
+                r = self.session.get(list_url, verify=False, timeout=15)
+                rj = r.json()
+            
+            if not rj.get('success'):
+                logging.error(f"Failed to fetch inbound for deletion: {rj}")
+                return False
+            
+            inbound = rj.get('obj')
+            settings = json.loads(inbound.get('settings', '{}'))
+            
+            # Find and remove the client
+            target_uuid = None
+            for client in settings.get('clients', []):
+                if client.get('email') == email:
+                    target_uuid = client.get('id')
+                    settings['clients'].remove(client)
+                    logging.info(f"Found client {email} with UUID {target_uuid}, removing...")
+                    break
+            
+            if not target_uuid:
+                logging.warning(f"Client {email} not found on server {self.base_url}")
+                return False
+            
+            # Update the inbound with the modified settings (client removed)
+            update_url = f"{self.base_url}/panel/api/inbounds/{self.inbound_id}"
+            update_data = {
+                "id": self.inbound_id,
+                "settings": json.dumps(settings)
+            }
+            
+            r = self.session.post(update_url, json=update_data, verify=False, timeout=15)
+            resp_json = r.json()
+            
+            if resp_json.get('success'):
+                logging.info(f"Successfully deleted client {email} (UUID: {target_uuid}) from {self.base_url}")
+                return True
+            else:
+                logging.error(f"Failed to delete client {email}: {resp_json}")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Exception in delete_client_by_email: {e}")
+            return False
+
 from datetime import datetime, timedelta
 import re
+import time
+
+# --- TRIAL TRACKING HELPERS ---
+"""
+Tracking file format (claimed_users.json):
+{
+    "8130396030": {
+        "link": "vless://...",
+        "timestamp": 1710086400,  # unix timestamp when trial was issued
+        "trial_type": "free",     # "free" or "premium"
+        "email": "FreeTrial_8130396030",
+        "server_name": "Server 1"
+    }
+}
+
+This allows us to:
+1. Track when each free trial was created
+2. Auto-delete accounts after 3 days
+3. Prevent users from getting multiple free trials
+"""
+
+def load_trial_tracking():
+    """Load trial tracking data with support for legacy format."""
+    try:
+        with open('claimed_users.json', 'r') as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {}
+    
+    # Legacy format migration: if data contains strings (old format), convert to new format
+    migrated = False
+    for user_id, value in list(data.items()):
+        if isinstance(value, str):
+            # Old format: {user_id: link} -> new format
+            data[user_id] = {
+                "link": value,
+                "timestamp": int(time.time()),  # Assume "now" for legacy entries
+                "trial_type": "free",
+                "email": f"FreeTrial_{user_id}",
+                "server_name": "Unknown"
+            }
+            migrated = True
+    
+    if migrated:
+        save_trial_tracking(data)
+        logging.info("Migrated trial tracking data to new format")
+    
+    return data
+
+def save_trial_tracking(data):
+    """Save trial tracking data."""
+    try:
+        with open('claimed_users.json', 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logging.error(f"Failed to save trial tracking: {e}")
+
+async def cleanup_expired_trials(application: Application):
+    """
+    Background task to delete free trial accounts after 3 days.
+    Runs periodically.
+    """
+    logging.info("🧹 Starting expired trial cleanup task...")
+    
+    try:
+        tracking = load_trial_tracking()
+        current_time = int(time.time())
+        three_days_seconds = 3 * 24 * 60 * 60  # 259200 seconds
+        
+        deleted_count = 0
+        
+        for user_id, trial_info in list(tracking.items()):
+            if isinstance(trial_info, dict):
+                trial_timestamp = trial_info.get('timestamp', 0)
+                email = trial_info.get('email', '')
+                server_name = trial_info.get('server_name', '')
+                trial_type = trial_info.get('trial_type', 'free')
+                
+                # Only auto-delete FREE trials after 3 days
+                if trial_type == 'free' and (current_time - trial_timestamp) >= three_days_seconds:
+                    logging.info(f"Deleting expired trial for user {user_id} (email: {email}, age: {(current_time - trial_timestamp)/86400:.1f} days)")
+                    
+                    # Find and delete the account from all servers
+                    delete_success = False
+                    for server in SERVERS:
+                        try:
+                            client = XUIClient(server)
+                            if client.delete_client_by_email(email):
+                                delete_success = True
+                                logging.info(f"✅ Deleted {email} from {server.get('name')}")
+                        except Exception as e:
+                            logging.warning(f"Failed to delete from {server.get('name')}: {e}")
+                    
+                    if delete_success:
+                        # Remove from tracking
+                        del tracking[user_id]
+                        deleted_count += 1
+                        
+                        # Try to notify user
+                        try:
+                            await application.bot.send_message(
+                                chat_id=int(user_id),
+                                text=(
+                                    "⏰ <b>Free Trial Expired</b>\n\n"
+                                    "Your 3-day free trial has expired and the account has been deleted.\n\n"
+                                    "💎 Want to continue using VPN?\n"
+                                    "👉 /start and select 'Premium' to get a 1-month plan!"
+                                ),
+                                parse_mode='HTML'
+                            )
+                        except Exception as e:
+                            logging.warning(f"Failed to notify user {user_id} about trial expiration: {e}")
+        
+        if deleted_count > 0:
+            save_trial_tracking(tracking)
+            logging.info(f"✅ Cleanup complete: {deleted_count} expired trials deleted")
+        else:
+            logging.info("✅ Cleanup complete: No expired trials found")
+            
+    except Exception as e:
+        logging.error(f"Error in cleanup_expired_trials: {e}")
+
 
 # ... (Previous imports remain)
 
@@ -487,16 +663,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.info(f"User {query.from_user.id} selected region: {region}")
         logging.debug(f"Available regions: {[s.get('region') for s in SERVERS]}")
         
-        # Check if user already has a key (simple tracking via file for now)
-        try:
-            with open('claimed_users.json', 'r') as f:
-                claimed = json.load(f)
-        except FileNotFoundError:
-            claimed = {}
-            
+        # Check if user already has a key using new tracking system
+        tracking = load_trial_tracking()
         user_id = str(query.from_user.id)
-        if user_id in claimed:
-            old_link = claimed[user_id]
+        
+        if user_id in tracking:
+            trial_info = tracking[user_id]
+            if isinstance(trial_info, dict):
+                old_link = trial_info.get('link', '')
+            else:
+                # Fallback for old format
+                old_link = trial_info
+
             # 1. Edit existing message (Warning)
             await query.edit_message_text(
                 "⚠️ <b>လူကြီးမင်းသည် Free Trial ရယူပြီးသား ဖြစ်ပါသည်။</b>\n\n"
@@ -583,11 +761,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if link:
                 if existed:
-                    # User already has a free trial
-                    if user_id not in claimed:
-                        claimed[user_id] = link
-                        with open('claimed_users.json', 'w') as f:
-                            json.dump(claimed, f)
+                    # User already has a free trial - update tracking with current timestamp
+                    if user_id not in tracking:
+                        tracking[user_id] = {
+                            "link": link,
+                            "timestamp": int(time.time()),
+                            "trial_type": "free",
+                            "email": username,
+                            "server_name": selected_server.get('name')
+                        }
+                        save_trial_tracking(tracking)
 
                     await query.edit_message_text(
                         "⚠️ <b>လူကြီးမင်းသည် အရင်ကပဲ Free Trial ရယူထားပြီးပါပြီ။</b>\n\n"
@@ -598,10 +781,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(chat_id=query.message.chat_id, text=f"`{link}`", parse_mode='MarkdownV2')
                     return
 
-                # New key issued
-                claimed[user_id] = link
-                with open('claimed_users.json', 'w') as f:
-                    json.dump(claimed, f)
+                # New key issued - save with timestamp
+                tracking[user_id] = {
+                    "link": link,
+                    "timestamp": int(time.time()),
+                    "trial_type": "free",
+                    "email": username,
+                    "server_name": selected_server.get('name')
+                }
+                save_trial_tracking(tracking)
 
                 await query.edit_message_text(
                     "✅ <b>အောင်မြင်ပါတယ်!</b>\n\n"
@@ -1128,6 +1316,16 @@ def main():
             logging.error("Conflict: terminated by other getUpdates request; ensure only one bot instance is running or switch to webhooks.")
 
     app.add_error_handler(error_handler)
+    
+    # Add periodic cleanup job for expired free trials (every hour)
+    job_queue = app.job_queue
+    job_queue.run_repeating(
+        cleanup_expired_trials,
+        interval=3600,  # 1 hour
+        first=10,  # Start after 10 seconds
+        name='cleanup_expired_trials'
+    )
+    logging.info("✅ Scheduled cleanup_expired_trials job to run every hour")
     
     print("Bot is running...")
     app.run_polling()
