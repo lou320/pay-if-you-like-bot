@@ -345,6 +345,72 @@ class XUIClient:
             logging.error(f"Exception in delete_client_by_email: {e}")
             return False
 
+    def reset_and_extend_client(self, target_uuid: str, expire_days: int = 30):
+        """Reset traffic counters to 0 and extend expiry by expire_days from now.
+        Returns (True, new_expiry_date_str) on success, (False, error_msg) on failure."""
+        import time as _time
+        from datetime import datetime as _dt
+
+        list_url = f"{self.base_url}/panel/api/inbounds/get/{self.inbound_id}"
+        try:
+            r = self.session.get(list_url, verify=False, timeout=15)
+            rj = r.json()
+            if not rj.get('success'):
+                self.login()
+                r = self.session.get(list_url, verify=False, timeout=15)
+                rj = r.json()
+            if not rj.get('success'):
+                return False, "Failed to fetch inbound data"
+
+            inbound  = rj['obj']
+            settings = json.loads(inbound.get('settings', '{}'))
+            clients  = settings.get('clients', [])
+
+            target_client = None
+            for c in clients:
+                if c.get('id') == target_uuid:
+                    target_client = dict(c)  # shallow copy
+                    break
+
+            if not target_client:
+                return False, "Client not found in this inbound"
+
+            email = target_client['email']
+
+            # Set new expiry (from now)
+            new_expiry_ms = int((_time.time() * 1000) + (expire_days * 86400 * 1000))
+            target_client['expiryTime'] = new_expiry_ms
+            target_client['totalGB']    = 100 * 1024 * 1024 * 1024  # 100 GB
+            target_client['enable']     = True
+
+            # Push updated client to X-UI
+            update_url  = f"{self.base_url}/panel/api/inbounds/updateClient/{target_uuid}"
+            update_data = {
+                "id":       self.inbound_id,
+                "settings": json.dumps({"clients": [target_client]})
+            }
+            r    = self.session.post(update_url, json=update_data, verify=False, timeout=15)
+            resp = r.json()
+            if not resp.get('success'):
+                return False, f"Update failed: {resp.get('msg', resp)}"
+
+            # Reset traffic counters
+            reset_url = (
+                f"{self.base_url}/panel/api/inbounds/"
+                f"{self.inbound_id}/resetClientTraffic/{email}"
+            )
+            r    = self.session.post(reset_url, verify=False, timeout=15)
+            resp = r.json()
+            if not resp.get('success'):
+                logging.warning(f"Traffic reset non-success for {email}: {resp}")
+
+            expiry_date = _dt.fromtimestamp(new_expiry_ms / 1000).strftime('%Y-%m-%d')
+            return True, expiry_date
+
+        except Exception as e:
+            logging.error(f"reset_and_extend_client error: {e}")
+            return False, str(e)
+
 from datetime import datetime, timedelta
 import re
 import time
@@ -403,6 +469,21 @@ def save_trial_tracking(data):
             json.dump(data, f, indent=2)
     except Exception as e:
         logging.error(f"Failed to save trial tracking: {e}")
+
+
+def find_client_by_uuid(target_uuid: str):
+    """Search every server for a client UUID.
+    Returns (server_config, XUIClient_instance, email) or (None, None, None)."""
+    for server in SERVERS:
+        try:
+            client = XUIClient(server)
+            stats  = client.get_client_stats(target_uuid)
+            if stats:
+                return server, client, stats['email']
+        except Exception:
+            continue
+    return None, None, None
+
 
 async def cleanup_expired_trials(application: Application):
     """
@@ -503,17 +584,55 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🚀 Free စမ်းသုံးမယ် (24 Hours)", callback_data='get_free')],
         [InlineKeyboardButton("💎 1 လစာ (100Gb) ဝယ်ယူမယ်", callback_data='buy_premium')],
-        [InlineKeyboardButton("📊 Data လက်ကျန်စစ်မယ်", callback_data='check_quota')],
+        [InlineKeyboardButton("� Key သက်တမ်းတိုးမည် (Renew)", callback_data='renew_key')],
+        [InlineKeyboardButton("�📊 Data လက်ကျန်စစ်မယ်", callback_data='check_quota')],
         [InlineKeyboardButton("❓ ဘယ်လိုသုံးရမလဲ", callback_data='help')]
     ]
     await update.message.reply_html(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Process only if photo sent
     user = update.message.from_user
     photo_file = await update.message.photo[-1].get_file()
-    
-    # Notify user: pending check
+
+    # ── Renewal slip ──────────────────────────────────────────────────────────
+    if context.user_data.get('state') == 'awaiting_renew_slip':
+        renew_info = context.user_data.get('renew_info', {})
+        context.user_data.pop('state', None)
+        context.user_data.pop('renew_info', None)
+
+        # Store pending renewal in bot_data so approval_handler can access it
+        context.bot_data.setdefault('renew_pending', {})[str(user.id)] = renew_info
+
+        await update.message.reply_text(
+            "⏳ <b>ငွေလွှဲပြေစာကို Admin သို့ ပေးပို့ပြီးပါပြီ။</b>\n\n"
+            "Admin မှ စစ်ဆေးပြီးပါက Key သက်တမ်း အလိုအလျောက် တိုးပေးပါမည်။\n"
+            "Admin ကိုဆက်သွယ်ရန် @payifyoulike",
+            parse_mode='HTML',
+            reply_markup=MAIN_MENU_KB
+        )
+        caption = (
+            f"🔄 <b>Key Renewal Slip!</b>\n\n"
+            f"👤 User: {user.full_name} (ID: <code>{user.id}</code>)\n"
+            f"🔗 <a href='tg://user?id={user.id}'>Chat with User</a>\n\n"
+            f"📋 <b>Email:</b> <code>{renew_info.get('email', 'N/A')}</code>\n"
+            f"🖥 <b>Server:</b> {renew_info.get('server_name', 'N/A')}"
+        )
+        keyboard = [[
+            InlineKeyboardButton("✅ Approve Renewal", callback_data=f'rnw_ok_{user.id}'),
+            InlineKeyboardButton("❌ Decline",         callback_data=f'rnw_no_{user.id}')
+        ]]
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_photo(
+                    chat_id=admin_id, photo=photo_file.file_id,
+                    caption=caption, parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            except Exception as e:
+                logging.error(f"Failed to send renewal slip to admin {admin_id}: {e}")
+        return
+
+    # ── Normal new-purchase slip ───────────────────────────────────────────────
     await update.message.reply_text(
         "⏳ <b>ငွေလွှဲပြေစာကို Admin သို့ ပေးပို့ထားပါသည်။</b>\n\n"
         "Admin မှ စစ်ဆေးပြီးပါက Key အလိုအလျောက် ရောက်ရှိလာပါမည်။ ခေတ္တစောင့်ဆိုင်းပေးပါ။\n\n"
@@ -521,21 +640,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='HTML',
         reply_markup=MAIN_MENU_KB
     )
-
-    # Forward to Admins with Buttons
     caption = (
         f"📩 <b>New Payment Slip!</b>\n\n"
         f"👤 User: {user.full_name} (ID: <code>{user.id}</code>)\n"
         f"🔗 <a href='tg://user?id={user.id}'>Chat with User</a>"
     )
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Approve", callback_data=f'approve_{user.id}'),
-            InlineKeyboardButton("❌ Decline", callback_data=f'decline_{user.id}')
-        ]
-    ]
-    
+    keyboard = [[
+        InlineKeyboardButton("✅ Approve", callback_data=f'approve_{user.id}'),
+        InlineKeyboardButton("❌ Decline", callback_data=f'decline_{user.id}')
+    ]]
     for admin_id in ADMIN_IDS:
         try:
             await context.bot.send_photo(
@@ -554,22 +667,113 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     data = query.data
-    action, user_id = data.split('_')
-    user_id = int(user_id)
-    
+
+    # ── Renewal approval (rnw_ok_USERID / rnw_no_USERID) ──────────────────────
+    if data.startswith('rnw_'):
+        _, sub_action, uid_str = data.split('_', 2)
+        user_id = int(uid_str)
+
+        if sub_action == 'no':
+            try:
+                await query.edit_message_caption(
+                    caption=f"{query.message.caption}\n\n❌ <b>RENEWAL DECLINED</b>",
+                    parse_mode='HTML'
+                )
+            except Exception:
+                pass
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "❌ <b>Key သက်တမ်းတိုး မအောင်မြင်ပါ။</b>\n\n"
+                    "ငွေလွှဲပြေစာ မှားယွင်းနေသည် သို့မဟုတ် Admin မှ ငြင်းပယ်ပါသည်။\n"
+                    "Admin ကိုဆက်သွယ်ရန် @payifyoulike"
+                ),
+                parse_mode='HTML',
+                reply_markup=MAIN_MENU_KB
+            )
+            return
+
+        # sub_action == 'ok'
+        pending = context.bot_data.get('renew_pending', {}).get(str(user_id))
+        if not pending:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"❌ No pending renewal found for user {user_id}. It may have expired."
+            )
+            return
+
+        try:
+            await query.edit_message_caption(
+                caption=f"{query.message.caption}\n\n✅ <b>RENEWAL APPROVED</b>",
+                parse_mode='HTML'
+            )
+        except Exception:
+            pass
+
+        target_uuid  = pending['uuid']
+        server_name  = pending.get('server_name', '')
+        email        = pending.get('email', '')
+
+        # Find the right server and extend
+        success = False
+        expiry_date = ''
+        for server in SERVERS:
+            if server.get('name') == server_name:
+                try:
+                    xui = XUIClient(server)
+                    success, expiry_date = xui.reset_and_extend_client(target_uuid)
+                    if success:
+                        break
+                except Exception as e:
+                    logging.error(f"Renew on {server_name} failed: {e}")
+
+        # Fallback: try other servers if name didn't match or failed
+        if not success:
+            server_obj, xui, resolved_email = find_client_by_uuid(target_uuid)
+            if xui:
+                success, expiry_date = xui.reset_and_extend_client(target_uuid)
+
+        # Clean up pending
+        context.bot_data.get('renew_pending', {}).pop(str(user_id), None)
+
+        if success:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "✅ <b>Key သက်တမ်းတိုးခြင်း အောင်မြင်ပါသည်။</b>\n\n"
+                    f"👤 <b>Email:</b> <code>{email}</code>\n"
+                    f"📅 <b>New Expiry:</b> {expiry_date}\n"
+                    f"📦 <b>Data:</b> 100GB (Reset to 0)\n\n"
+                    "Key အတူတူပဲ ဆက်သုံးနိုင်ပါပြီ။"
+                ),
+                parse_mode='HTML',
+                reply_markup=MAIN_MENU_KB
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="❌ Key သက်တမ်းတိုး မအောင်မြင်ပါ။ Admin ကိုဆက်သွယ်ပါ @payifyoulike",
+                parse_mode='HTML',
+                reply_markup=MAIN_MENU_KB
+            )
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"⚠️ Renewal extend failed for user {user_id} / UUID {target_uuid}"
+            )
+        return
+
+    # ── New premium key approval (approve_USERID / decline_USERID) ────────────
+    action, uid_str = data.split('_', 1)
+    user_id = int(uid_str)
+
     if action == 'approve':
         # Reconstruct caption with link
         old_text = query.message.caption
-        # Try to extract Name and ID. Format: 📩 New Payment Slip!\n\n👤 User: {name} (ID: {id})...
         import re
         try:
             match = re.search(r"User: (.+) \(ID: (\d+)\)", old_text)
-            if match:
-                user_name = match.group(1)
-                # user_id is already known from callback_data
-            else:
-                user_name = "User"
-        except:
+            user_name = match.group(1) if match else "User"
+        except Exception:
             user_name = "User"
 
         new_caption = (
@@ -580,13 +784,10 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         try:
-            await query.edit_message_caption(
-                caption=new_caption,
-                parse_mode='HTML'
-            )
+            await query.edit_message_caption(caption=new_caption, parse_mode='HTML')
         except Exception as e:
             logging.warning(f"Caption edit failed: {e}")
-        
+
         # Generate Key
         try:
             username = f"Premium_{user_id}_{secrets.token_hex(2)}"
@@ -604,27 +805,23 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else:
                         link = result
                         existed = False
-
                     if link:
                         target_server = server
                         break
                 except Exception as server_error:
                     logging.warning(f"Premium key generation failed on {server.get('name')}: {server_error}")
-            
+
             if link:
-                # Send to User (1. Info)
                 await context.bot.send_message(
                     chat_id=user_id,
                     text=(
-                        f"✅ <b>ငွေလွှဲအောင်မြင်ပါသည်။</b>\n\n"
-                        f"💎 <b>Premium Key (1 Month / 100GB):</b>\n"
+                        "✅ <b>ငွေလွှဲအောင်မြင်ပါသည်။</b>\n\n"
+                        "💎 <b>Premium Key (1 Month / 100GB):</b>\n"
                         f"Server: {target_server.get('name')}\n"
                         "👇 <b>အောက်ပါ Key ကို Copy ယူပါ:</b>"
                     ),
                     parse_mode='HTML'
                 )
-                
-                # Send to User (2. Key Isolated)
                 await context.bot.send_message(
                     chat_id=user_id,
                     text=f"<code>{link}</code>",
@@ -644,14 +841,19 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             else:
                 await context.bot.send_message(chat_id=query.message.chat_id, text="❌ Error generating key.")
-                
+
         except Exception as e:
             logging.error(f"Approval Error: {e}")
             await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ System Error: {e}")
 
     elif action == 'decline':
-        await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ <b>DECLINED</b>")
-        # Notify User
+        try:
+            await query.edit_message_caption(
+                caption=f"{query.message.caption}\n\n❌ <b>DECLINED</b>",
+                parse_mode='HTML'
+            )
+        except Exception:
+            pass
         await context.bot.send_message(
             chat_id=user_id,
             text=(
@@ -815,6 +1017,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"❌ System Error: {str(e)[:50]}...")
 
 
+    elif query.data == 'renew_key':
+        context.user_data['state'] = 'awaiting_renew_key'
+        msg = (
+            "🔄 <b>Key သက်တမ်းတိုးခြင်း</b>\n\n"
+            "လူကြီးမင်း၏ ရှိပြီးသား <b>VLESS Key</b> ကို ဤနေရာ ပေးပို့ပါ။\n"
+            "Bot မှ Key ရှိမရှိ စစ်ဆေးပြီး ငွေပေးချေနည်းကို ပြသပါမည်။\n\n"
+            "<i>(Key အစအဆုံး <code>vless://...</code> မှ Copy ကူးထည့်ပါ)</i>"
+        )
+        keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]]
+        await query.edit_message_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
     elif query.data == 'buy_premium':
         # Payment Instructions
         msg = (
@@ -953,7 +1167,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("➕ Generate 1 Month Key", callback_data='admin_gen_1m')],
         [InlineKeyboardButton("⚡️ Generate Trial Key", callback_data='admin_gen_trial')],
-        [InlineKeyboardButton("🖥️ Server Status", callback_data='admin_status')],
+        [InlineKeyboardButton("� Extend a Key (No Payment)", callback_data='admin_extend_key')],
+        [InlineKeyboardButton("�🖥️ Server Status", callback_data='admin_status')],
         [InlineKeyboardButton("🔌 Add New Server", callback_data='admin_add_server')]
     ]
     await update.message.reply_text("👑 <b>Admin Control Panel</b>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -996,6 +1211,19 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👤 <b>Enter Username for {duration}:</b>\n"
             f"Selected: Server {idx+1}\n\n"
             "Reply with the name.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    elif query.data == 'admin_extend_key':
+        context.user_data['gen_type'] = 'extend_key'
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='admin_cancel')]]
+        await query.edit_message_text(
+            "🔄 <b>Extend a Key (No Payment)</b>\n\n"
+            "ချဲ့ထွင်လိုသော <b>VLESS Key</b> ကို ပေးပို့ပါ။\n"
+            "Bot မှ အလိုအလျောက် Traffic reset + 30 ရက် သက်တမ်းတိုးပေးပါမည်။\n\n"
+            "<i>(vless://... key အပြည့်အစုံ ကူးထည့်ပါ)</i>",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -1048,7 +1276,94 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start(update, context)
         return
 
-    # Check for VLESS Key (Quota Check)
+    # ── User renewal: waiting for VLESS key ───────────────────────────────────
+    if context.user_data.get('state') == 'awaiting_renew_key':
+        if not text.startswith('vless://'):
+            await update.message.reply_text(
+                "⚠️ VLESS Key ပုံစံမှားနေပါသည်။\n"
+                "<code>vless://</code> ဖြင့် စသောKey ကိုသာ ပေးပို့ပါ။",
+                parse_mode='HTML'
+            )
+            return
+
+        status_msg = await update.message.reply_text("🔍 Key စစ်ဆေးနေပါသည်...", parse_mode='HTML')
+        import re
+        match = re.search(r'vless://([a-f0-9\-]+)@', text)
+        if not match:
+            await status_msg.edit_text("❌ Key ပုံစံ မမှန်ကန်ပါ (UUID မတွေ့ရပါ)။")
+            return
+
+        target_uuid = match.group(1)
+        server_obj, xui, email = find_client_by_uuid(target_uuid)
+
+        if not server_obj:
+            await status_msg.edit_text(
+                "❌ ဤ Key ကို Server ပေါ်တွင် မတွေ့ရှိပါ။\n"
+                "Key မှန်မှန်ကန်ကန် ထည့်ပေးပါ သို့မဟုတ် Admin ကိုဆက်သွယ်ပါ။"
+            )
+            return
+
+        # Key is valid — store info and ask for payment slip
+        context.user_data['state']      = 'awaiting_renew_slip'
+        context.user_data['renew_info'] = {
+            'uuid':        target_uuid,
+            'email':       email,
+            'server_name': server_obj.get('name', ''),
+        }
+        context.user_data.pop('state', None)   # will be re-set below
+        context.user_data['state'] = 'awaiting_renew_slip'
+
+        await status_msg.edit_text(
+            f"✅ <b>Key တွေ့ပါသည်!</b>\n\n"
+            f"👤 <b>Email:</b> <code>{email}</code>\n"
+            f"🖥 <b>Server:</b> {server_obj.get('name')}\n\n"
+            "💳 <b>ငွေပေးချေရန်</b>\n"
+            "အောက်ပါ KPay အကောင့်သို့ <b>5,000 Ks</b> လွှဲပေးပါ\n"
+            "📞 <b>09799881201</b> (Daw Tin Tin Yee)\n"
+            "📝 Note: <code>Renew</code>\n\n"
+            "✅ ငွေလွှဲပြီးပါက Slip ဓာတ်ပုံကို ဒီ Bot သို့ ပေးပို့ပါ။",
+            parse_mode='HTML'
+        )
+        return
+
+    # ── Admin direct extend: waiting for VLESS key ────────────────────────────
+    if context.user_data.get('gen_type') == 'extend_key':
+        if not text.startswith('vless://'):
+            await update.message.reply_text("⚠️ Please send a valid <code>vless://</code> key.", parse_mode='HTML')
+            return
+
+        context.user_data['gen_type'] = None
+        status_msg = await update.message.reply_text("🔍 Searching...", parse_mode='HTML')
+        import re
+        match = re.search(r'vless://([a-f0-9\-]+)@', text)
+        if not match:
+            await status_msg.edit_text("❌ Invalid key format (UUID not found).")
+            return
+
+        target_uuid = match.group(1)
+        server_obj, xui, email = find_client_by_uuid(target_uuid)
+
+        if not xui:
+            await status_msg.edit_text("❌ Key not found on any server.")
+            return
+
+        await status_msg.edit_text("⚙️ Extending...")
+        success, result = xui.reset_and_extend_client(target_uuid)
+
+        if success:
+            await status_msg.edit_text(
+                f"✅ <b>Extended Successfully!</b>\n\n"
+                f"👤 Email: <code>{email}</code>\n"
+                f"🖥 Server: {server_obj.get('name')}\n"
+                f"📅 New Expiry: {result}\n"
+                "📦 Traffic reset to 0 · 100 GB quota restored",
+                parse_mode='HTML'
+            )
+        else:
+            await status_msg.edit_text(f"❌ Failed: {result}")
+        return
+
+    # ── Generic VLESS key → Quota Check ───────────────────────────────────────
     if text.startswith("vless://"):
         try:
             status_msg = await update.message.reply_text("🔍 <b>ရှာဖွေနေပါသည်...</b>", parse_mode='HTML')
@@ -1224,8 +1539,45 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if document is an image
     if update.message.document.mime_type and 'image' in update.message.document.mime_type:
         document_file = await update.message.document.get_file()
-        
-        # Notify user: pending check
+
+        # ── Renewal slip (file) ────────────────────────────────────────────────
+        if context.user_data.get('state') == 'awaiting_renew_slip':
+            renew_info = context.user_data.get('renew_info', {})
+            context.user_data.pop('state', None)
+            context.user_data.pop('renew_info', None)
+
+            context.bot_data.setdefault('renew_pending', {})[str(user.id)] = renew_info
+
+            await update.message.reply_text(
+                "⏳ <b>ငွေလွှဲပြေစာကို Admin သို့ ပေးပို့ပြီးပါပြီ။</b>\n\n"
+                "Admin မှ စစ်ဆေးပြီးပါက Key သက်တမ်း အလိုအလျောက် တိုးပေးပါမည်。\n"
+                "Admin ကိုဆက်သွယ်ရန် @payifyoulike",
+                parse_mode='HTML',
+                reply_markup=MAIN_MENU_KB
+            )
+            caption = (
+                f"🔄 <b>Key Renewal Slip (File)!</b>\n\n"
+                f"👤 User: {user.full_name} (ID: <code>{user.id}</code>)\n"
+                f"🔗 <a href='tg://user?id={user.id}'>Chat with User</a>\n\n"
+                f"📋 <b>Email:</b> <code>{renew_info.get('email', 'N/A')}</code>\n"
+                f"🖥 <b>Server:</b> {renew_info.get('server_name', 'N/A')}"
+            )
+            keyboard = [[
+                InlineKeyboardButton("✅ Approve Renewal", callback_data=f'rnw_ok_{user.id}'),
+                InlineKeyboardButton("❌ Decline",         callback_data=f'rnw_no_{user.id}')
+            ]]
+            for admin_id in ADMIN_IDS:
+                try:
+                    await context.bot.send_document(
+                        chat_id=admin_id, document=document_file.file_id,
+                        caption=caption, parse_mode='HTML',
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                except Exception as e:
+                    logging.error(f"Failed to send renewal doc to admin {admin_id}: {e}")
+            return
+
+        # ── New purchase slip (file) ───────────────────────────────────────────
         await update.message.reply_text(
             "⏳ <b>ငွေလွှဲပြေစာကို Admin သို့ ပေးပို့ထားပါသည်။</b>\n\n"
             "Admin မှ စစ်ဆေးပြီးပါက Key အလိုအလျောက် ရောက်ရှိလာပါမည်။ ခေတ္တစောင့်ဆိုင်းပေးပါ။\n\n"
@@ -1233,21 +1585,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML',
             reply_markup=MAIN_MENU_KB
         )
-
-        # Forward to Admins with Buttons
         caption = (
             f"📩 <b>New Payment Slip (File)!</b>\n\n"
             f"👤 User: {user.full_name} (ID: <code>{user.id}</code>)\n"
             f"🔗 <a href='tg://user?id={user.id}'>Chat with User</a>"
         )
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Approve", callback_data=f'approve_{user.id}'),
-                InlineKeyboardButton("❌ Decline", callback_data=f'decline_{user.id}')
-            ]
-        ]
-        
+        keyboard = [[
+            InlineKeyboardButton("✅ Approve", callback_data=f'approve_{user.id}'),
+            InlineKeyboardButton("❌ Decline", callback_data=f'decline_{user.id}')
+        ]]
         for admin_id in ADMIN_IDS:
             try:
                 await context.bot.send_document(
@@ -1269,8 +1615,8 @@ def main():
     # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CallbackQueryHandler(button_handler, pattern='^(get_|buy_|help|guide_|main_|check_)'))
-    app.add_handler(CallbackQueryHandler(approval_handler, pattern='^(approve_|decline_)'))
+    app.add_handler(CallbackQueryHandler(button_handler, pattern='^(get_|buy_|renew_|help|guide_|main_|check_)'))
+    app.add_handler(CallbackQueryHandler(approval_handler, pattern='^(approve_|decline_|rnw_ok_|rnw_no_)'))
     app.add_handler(CallbackQueryHandler(admin_handler, pattern='^admin_'))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
