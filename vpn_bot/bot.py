@@ -1021,9 +1021,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['state'] = 'awaiting_renew_key'
         msg = (
             "🔄 <b>Key သက်တမ်းတိုးခြင်း</b>\n\n"
-            "လူကြီးမင်း၏ ရှိပြီးသား <b>VLESS Key</b> ကို ဤနေရာ ပေးပို့ပါ။\n"
-            "Bot မှ Key ရှိမရှိ စစ်ဆေးပြီး ငွေပေးချေနည်းကို ပြသပါမည်။\n\n"
-            "<i>(Key အစအဆုံး <code>vless://...</code> မှ Copy ကူးထည့်ပါ)</i>"
+            "လူကြီးမင်း၏ ရှိပြီးသား <b>VLESS Key</b> ကို ပေးပို့ပါ။\n"
+            "Bot မှ Key ရှိမရှိ စစ်ဆေးပြီး ငွေပေးချေရန်နောက်တစ်ဆင့် ပြသပါမည်။\n\n"
+            "<i>(Key အစအဆုံး <code>vless://...</code> မှစ၍ Copy ကူးထည့်ပါ)</i>"
         )
         keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]]
         await query.edit_message_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1037,7 +1037,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📞 <b>09799881201</b> (Daw Tin Tin Yee)\n"
             "📝 Note နေရာတွင် <code>Payment</code> လို့ပဲထည့်ပေးပါနော် တခြားဘာမှမထည့်ပါနဲ့ဗျ\n\n"
             "✅ <b>ငွေလွှဲပြီးပါက ငွေလွှဲပြေစာ (Slip) ဓာတ်ပုံကို ဒီ Bot သို့ ပို့ပေးပါ။</b>\n"
-            "စစ်ဆေးပြီး ၁၀ စက္ကန့်အတွင်း Key ပို့ပေးပါမည်။"
+            "စစ်ဆေးပြီး Key ပို့ပေးပါမည်။"
         )
         keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]]
         await query.edit_message_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1125,7 +1125,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'check_quota':
         msg = (
             "📊 <b>Data လက်ကျန်စစ်ဆေးရန်</b>\n\n"
-            "လူကြီးမင်း၏ <b>VLESS Key</b> ကို ဤနေရာသို့ ပေးပို့လိုက်ပါ။\n\n"
+            " <b>VLESS Key</b> ကို ဤနေရာသို့ ပေးပို့လိုက်ပါ။\n\n"
             "<i>(Key အစအဆုံး <code>vless://...</code> မှ စပြီး Copy ကူးထည့်ပါ)</i>"
         )
         keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]]
@@ -1318,10 +1318,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👤 <b>Email:</b> <code>{email}</code>\n"
             f"🖥 <b>Server:</b> {server_obj.get('name')}\n\n"
             "💳 <b>ငွေပေးချေရန်</b>\n"
-            "အောက်ပါ KPay အကောင့်သို့ <b>5,000 Ks</b> လွှဲပေးပါ\n"
+            "အောက်ပါ KPay အကောင့်သို့ <b>5,000 Ks</b> လွှဲပေးပါ။\n\n"
             "📞 <b>09799881201</b> (Daw Tin Tin Yee)\n"
-            "📝 Note: <code>Renew</code>\n\n"
-            "✅ ငွေလွှဲပြီးပါက Slip ဓာတ်ပုံကို ဒီ Bot သို့ ပေးပို့ပါ။",
+            "📝 Note နေရာတွင် <code>Payment</code> လို့ပဲထည့်ပေးပါနော် တခြားဘာမှမထည့်ပါနဲ့ဗျ\n\n"
+            "✅ <b>ငွေလွှဲပြီးပါက ငွေလွှဲပြေစာ (Slip) ဓာတ်ပုံကို ဒီ Bot သို့ ပို့ပေးပါ။</b>\n"
+            "စစ်ဆေးပြီး Key ပို့ပေးပါမည်။",
             parse_mode='HTML'
         )
         return
