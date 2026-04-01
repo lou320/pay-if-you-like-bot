@@ -9,12 +9,20 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ADMIN_BOT_DIR="$REPO_ROOT/admin_bot"
 VPN_BOT_DIR="$REPO_ROOT/vpn_bot"
+DASHBOARD_DIR="$REPO_ROOT/dashboard"
 VENV_BIN="$REPO_ROOT/venv/bin/python3"
 
 ADMIN_BOT_LOG="$REPO_ROOT/admin_bot.log"
 VPN_BOT_LOG="$REPO_ROOT/vpn_bot.log"
+DASHBOARD_LOG="$REPO_ROOT/dashboard.log"
 ADMIN_BOT_PID_FILE="$REPO_ROOT/.admin_bot.pid"
 VPN_BOT_PID_FILE="$REPO_ROOT/.vpn_bot.pid"
+DASHBOARD_PID_FILE="$REPO_ROOT/.dashboard.pid"
+
+# Dashboard credentials — override via environment variables
+DASH_USER="${DASH_USER:-admin}"
+DASH_PASS="${DASH_PASS:-changeme}"
+DASH_PORT="${DASH_PORT:-5050}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -78,8 +86,29 @@ start_bots() {
         print_error "VPN Bot failed to start"
         return 1
     fi
-    
-    print_status "Both bots are now running!"
+
+    sleep 1
+
+    # Start Dashboard
+    print_info "Starting Dashboard..."
+    cd "$DASHBOARD_DIR"
+    DASH_USER="$DASH_USER" DASH_PASS="$DASH_PASS" DASH_PORT="$DASH_PORT" \
+        nohup $VENV_BIN -u app.py > "$DASHBOARD_LOG" 2>&1 &
+    DASH_PID=$!
+    echo $DASH_PID > "$DASHBOARD_PID_FILE"
+    print_status "Dashboard started (PID: $DASH_PID)"
+    print_info "Log:  $DASHBOARD_LOG"
+    print_info "URL:  http://$(hostname -I | awk '{print $1}'):$DASH_PORT  (login: $DASH_USER / $DASH_PASS)"
+
+    sleep 2
+
+    if ps -p $DASH_PID > /dev/null; then
+        print_status "Dashboard is running"
+    else
+        print_error "Dashboard failed to start — check $DASHBOARD_LOG"
+    fi
+
+    print_status "All services are now running!"
 }
 
 stop_bots() {
@@ -102,12 +131,22 @@ stop_bots() {
         fi
         rm -f "$VPN_BOT_PID_FILE"
     fi
-    
+
+    if [ -f "$DASHBOARD_PID_FILE" ]; then
+        DASH_PID=$(cat "$DASHBOARD_PID_FILE")
+        if ps -p $DASH_PID > /dev/null 2>&1; then
+            kill $DASH_PID 2>/dev/null || true
+            print_status "Dashboard stopped"
+        fi
+        rm -f "$DASHBOARD_PID_FILE"
+    fi
+
     # Fallback: kill all matching processes
     pkill -f "admin_bot/bot.py" || true
-    pkill -f "vpn_bot/bot.py" || true
-    
-    print_status "All bots stopped"
+    pkill -f "vpn_bot/bot.py"   || true
+    pkill -f "dashboard/app.py" || true
+
+    print_status "All services stopped"
 }
 
 status_bots() {
@@ -140,12 +179,25 @@ status_bots() {
         print_error "VPN Bot is NOT running (no PID file)"
     fi
     
+    DASH_RUNNING=0
+    if [ -f "$DASHBOARD_PID_FILE" ]; then
+        DASH_PID=$(cat "$DASHBOARD_PID_FILE")
+        if ps -p $DASH_PID > /dev/null 2>&1; then
+            print_status "Dashboard is running (PID: $DASH_PID)  →  port $DASH_PORT"
+            DASH_RUNNING=1
+        else
+            print_error "Dashboard is NOT running (stale PID: $DASH_PID)"
+        fi
+    else
+        print_error "Dashboard is NOT running (no PID file)"
+    fi
+
     echo ""
-    if [ $ADMIN_RUNNING -eq 1 ] && [ $VPN_RUNNING -eq 1 ]; then
-        print_status "Both bots are running ✓"
+    if [ $ADMIN_RUNNING -eq 1 ] && [ $VPN_RUNNING -eq 1 ] && [ $DASH_RUNNING -eq 1 ]; then
+        print_status "All services are running ✓"
         return 0
     else
-        print_error "One or more bots are not running ✗"
+        print_error "One or more services are not running ✗"
         return 1
     fi
 }
