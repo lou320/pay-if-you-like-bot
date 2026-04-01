@@ -22,22 +22,49 @@ SERVERS = CONFIG['servers']
 ADMIN_IDS = CONFIG['admin_ids']
 logging.info(f"Configuration loaded: {len(SERVERS)} servers, {len(ADMIN_IDS)} admins")
 for s in SERVERS:
-    logging.debug(f"  Server: {s.get('name')} (region={s.get('region')})")
+    logging.debug(f"  Server: {s.get('name')}")
 MAIN_MENU_KB = ReplyKeyboardMarkup([['အစသို့ပြန်သွားပါ']], resize_keyboard=True)
 
 
 # --- HELPER FUNCTIONS ---
-def get_servers_by_region(region):
-    """Get all servers for a specific region"""
-    return [s for s in SERVERS if s.get('region', '').lower() == region.lower()]
+ROTATION_STATE_FILE = 'server_rotation_state.json'
 
-def get_random_server_by_region(region):
-    """Get a random server for a specific region"""
-    servers = get_servers_by_region(region)
+
+def get_active_servers():
+    """Use enabled servers only; fall back to all servers if none are explicitly enabled."""
+    enabled = [s for s in SERVERS if s.get('enabled', True)]
+    return enabled if enabled else SERVERS
+
+
+def load_rotation_state():
+    try:
+        with open(ROTATION_STATE_FILE, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {"next_index": 0}
+
+
+def save_rotation_state(state):
+    try:
+        with open(ROTATION_STATE_FILE, 'w') as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        logging.warning(f"Failed to persist rotation state: {e}")
+
+
+def get_round_robin_servers():
+    """Return active servers ordered by round-robin and advance pointer for equal distribution."""
+    servers = get_active_servers()
     if not servers:
-        return None
-    import random
-    return random.choice(servers)
+        return []
+
+    state = load_rotation_state()
+    start_idx = int(state.get('next_index', 0)) % len(servers)
+    ordered = servers[start_idx:] + servers[:start_idx]
+
+    state['next_index'] = (start_idx + 1) % len(servers)
+    save_rotation_state(state)
+    return ordered
 
 # --- X-UI API CLIENT ---
 class XUIClient:
@@ -562,31 +589,27 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Generate Key
         try:
-            # Load Balancing Logic
-            target_server = SERVERS[CONFIG.get('default_server_id', 0)]
-            min_clients = 99999
-            for s in SERVERS:
-                try:
-                    temp_c = XUIClient(s)
-                    # Simplified check
-                    list_url = f"{temp_c.base_url}/panel/api/inbounds/get/{temp_c.inbound_id}"
-                    r = temp_c.session.get(list_url, verify=False, timeout=5)
-                    if r.json().get('success'):
-                        count = len(json.loads(r.json()['obj']['settings'])['clients'])
-                        if count < min_clients:
-                            min_clients = count
-                            target_server = s
-                except:
-                    continue
-            
-            client = XUIClient(target_server)
             username = f"Premium_{user_id}_{secrets.token_hex(2)}"
-            result = client.add_client(email=username, limit_gb=100, expire_days=30)
-            if isinstance(result, tuple):
-                link, existed = result
-            else:
-                link = result
-                existed = False
+            target_server = None
+            link = None
+            existed = False
+
+            candidate_servers = get_round_robin_servers()
+            for server in candidate_servers:
+                try:
+                    client = XUIClient(server)
+                    result = client.add_client(email=username, limit_gb=100, expire_days=30)
+                    if isinstance(result, tuple):
+                        link, existed = result
+                    else:
+                        link = result
+                        existed = False
+
+                    if link:
+                        target_server = server
+                        break
+                except Exception as server_error:
+                    logging.warning(f"Premium key generation failed on {server.get('name')}: {server_error}")
             
             if link:
                 # Send to User (1. Info)
@@ -645,24 +668,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     if query.data == 'get_free':
-        # Show region selection
-        text = "🌍 <b>ကြိုက်နှစ်သက်ရာ Region ကိုရွေးချယ်ပေးပါခင်ဗျာ</b>"
-        keyboard = [
-            [InlineKeyboardButton("🇸🇬 Singapore", callback_data='region_free_singapore')],
-            [InlineKeyboardButton("🇯🇵 Japan", callback_data='region_free_japan')],
-            [InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]
-        ]
-        await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
-        return
-    
-    if query.data.startswith('region_free_'):
-        region = query.data.split('_')[2]
-        if context.user_data is None:
-            context.user_data = {}
-        context.user_data['selected_region'] = region
-        logging.info(f"User {query.from_user.id} selected region: {region}")
-        logging.debug(f"Available regions: {[s.get('region') for s in SERVERS]}")
-        
         # Check if user already has a key using new tracking system
         tracking = load_trial_tracking()
         user_id = str(query.from_user.id)
@@ -707,57 +712,40 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         await query.edit_message_text("⚙️ <b>Key ထုတ်ပေးနေပါသည်... ခဏစောင့်ပါ...</b>", parse_mode='HTML')
-        
-        # Get selected region from user context
-        region = context.user_data.get('selected_region', 'singapore')
-        region_servers = get_servers_by_region(region)
-        logging.info(f"Region: {region}, Found servers: {len(region_servers)}, Server list: {[s.get('name') for s in region_servers]}")
-        
-        if not region_servers:
+
+        candidate_servers = get_round_robin_servers()
+        logging.info(f"Round-robin candidates for free trial: {[s.get('name') for s in candidate_servers]}")
+
+        if not candidate_servers:
             await query.edit_message_text(
-                f"❌ {region.capitalize()} အဆင်မပြေ။ နောက်အကြိမ်စမ်းကြည့်ပါ။",
+                "❌ Server မရရှိနိုင်သေးပါ။ နောက်အကြိမ်စမ်းကြည့်ပါ။",
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]])
             )
             return
-        
-        # --- SMART LOAD BALANCING LOGIC (Region-specific) ---
-        # 1. Check all servers in the selected region
-        # 2. Count clients on each
-        # 3. Pick the one with FEWEST clients
-        selected_server = region_servers[0]
-        min_clients = 99999
-        
-        try:
-            for s in region_servers:
-                try:
-                    temp_client = XUIClient(s)
-                    list_url = f"{temp_client.base_url}/panel/api/inbounds/get/{temp_client.inbound_id}"
-                    r = temp_client.session.get(list_url, verify=False, timeout=5)
-                    if r.json().get('success'):
-                        # Count active clients
-                        count = len(json.loads(r.json()['obj']['settings'])['clients'])
-                        if count < min_clients:
-                            min_clients = count
-                            selected_server = s
-                except Exception as e:
-                    logging.warning(f"Server {s.get('name')} check failed: {e}")
-                    continue
-        except:
-            pass # Fallback to Server 0
             
-        # Generate on the selected best server
+        # Generate on round-robin server order
         try:
-            client = XUIClient(selected_server)
             username = f"FreeTrial_{query.from_user.id}"
-            
-            # Create Key (2GB Limit, 1 Day)
-            result = client.add_client(email=username, limit_gb=2, expire_days=1)
-            if isinstance(result, tuple):
-                link, existed = result
-            else:
-                link = result
-                existed = False
+            selected_server = None
+            link = None
+            existed = False
+
+            for server in candidate_servers:
+                try:
+                    client = XUIClient(server)
+                    result = client.add_client(email=username, limit_gb=2, expire_days=1)
+                    if isinstance(result, tuple):
+                        link, existed = result
+                    else:
+                        link = result
+                        existed = False
+
+                    if link:
+                        selected_server = server
+                        break
+                except Exception as server_error:
+                    logging.warning(f"Free trial generation failed on {server.get('name')}: {server_error}")
             
             if link:
                 if existed:
@@ -828,25 +816,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
     elif query.data == 'buy_premium':
-        # Show region selection for premium
-        text = "🌍 <b>ကြိုက်နှစ်သက်ရာ Region ကိုရွေးချယ်ပေးပါခင်ဗျာ</b>"
-        keyboard = [
-            [InlineKeyboardButton("🇸🇬 Singapore", callback_data='region_premium_singapore')],
-            [InlineKeyboardButton("🇯🇵 Japan", callback_data='region_premium_japan')],
-            [InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]
-        ]
-        await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
-        return
-    
-    elif query.data.startswith('region_premium_'):
-        region = query.data.split('_')[2]
-        if context.user_data is None:
-            context.user_data = {}
-        context.user_data['selected_region'] = region
-        
         # Payment Instructions
         msg = (
-            f"💎 <b>1လစာ ဝယ်ယူမည် ({region.capitalize()})</b>\n\n"
+            "💎 <b>1လစာ ဝယ်ယူမည်</b>\n\n"
             "အောက်ပါ KPay အကောင့်သို့ <b>5,000 Ks</b> လွှဲပေးပါ။\n\n"
             "📞 <b>09799881201</b> (Daw Tin Tin Yee)\n"
             "📝 Note နေရာတွင် <code>Payment</code> လို့ပဲထည့်ပေးပါနော် တခြားဘာမှမထည့်ပါနဲ့ဗျ\n\n"
@@ -1297,7 +1269,7 @@ def main():
     # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CallbackQueryHandler(button_handler, pattern='^(get_|buy_|help|guide_|main_|check_|region_)'))
+    app.add_handler(CallbackQueryHandler(button_handler, pattern='^(get_|buy_|help|guide_|main_|check_)'))
     app.add_handler(CallbackQueryHandler(approval_handler, pattern='^(approve_|decline_)'))
     app.add_handler(CallbackQueryHandler(admin_handler, pattern='^admin_'))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
@@ -1319,13 +1291,16 @@ def main():
     
     # Add periodic cleanup job for expired free trials (every hour)
     job_queue = app.job_queue
-    job_queue.run_repeating(
-        cleanup_expired_trials,
-        interval=3600,  # 1 hour
-        first=10,  # Start after 10 seconds
-        name='cleanup_expired_trials'
-    )
-    logging.info("✅ Scheduled cleanup_expired_trials job to run every hour")
+    if job_queue is not None:
+        job_queue.run_repeating(
+            cleanup_expired_trials,
+            interval=3600,  # 1 hour
+            first=10,  # Start after 10 seconds
+            name='cleanup_expired_trials'
+        )
+        logging.info("✅ Scheduled cleanup_expired_trials job to run every hour")
+    else:
+        logging.warning("⚠️  JobQueue not available. Install via: pip install 'python-telegram-bot[job-queue]'. Cleanup task will NOT run.")
     
     print("Bot is running...")
     app.run_polling()
