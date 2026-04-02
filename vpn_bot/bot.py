@@ -1036,7 +1036,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "အောက်ပါ KPay အကောင့်သို့ <b>5,000 Ks</b> လွှဲပေးပါ။\n\n"
             "📞 <b>09799881201</b> (Daw Tin Tin Yee)\n"
             "📝 Note နေရာတွင် <code>Payment</code> လို့ပဲထည့်ပေးပါနော် တခြားဘာမှမထည့်ပါနဲ့ဗျ\n\n"
-            "✅ <b>ငွေလွှဲပြီးပါက ငွေလွှဲပြေစာ (Slip) ဓာတ်ပုံကို ဒီ Bot သို့ ပို့ပေးပါ။ စစ်ဆေးပြီး Key ပို့ပေးပါမည်။</b>\n",
+            "✅ <b>ငွေလွှဲပြီးပါက ငွေလွှဲပြေစာ (Slip) ဓာတ်ပုံကို ဒီ Bot သို့ ပို့ပေးပါ။ စစ်ဆေးပြီး Key ပို့ပေးပါမည်။</b>\n"
         )
         keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]]
         await query.edit_message_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
