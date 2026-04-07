@@ -28,6 +28,10 @@ MAIN_MENU_KB = ReplyKeyboardMarkup([['အစသို့ပြန်သွား
 
 # --- HELPER FUNCTIONS ---
 ROTATION_STATE_FILE = 'server_rotation_state.json'
+NOTICE_STATE_FILE = 'notice_state.json'
+EXPIRY_NOTICE_DAYS = 3
+LOW_DATA_NOTICE_GB = 2
+NOTICE_COOLDOWN_SECONDS = 24 * 60 * 60
 
 
 def get_active_servers():
@@ -65,6 +69,113 @@ def get_round_robin_servers():
     state['next_index'] = (start_idx + 1) % len(servers)
     save_rotation_state(state)
     return ordered
+
+
+def load_notice_state():
+    try:
+        with open(NOTICE_STATE_FILE, 'r') as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_notice_state(state):
+    try:
+        with open(NOTICE_STATE_FILE, 'w') as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        logging.warning(f"Failed to persist notice state: {e}")
+
+
+def extract_user_id_from_email(email: str):
+    """Extract Telegram user ID from bot-generated email labels, e.g. Premium_1234_abcd."""
+    if not email:
+        return None
+
+    m = re.match(r'^(?:Premium|FreeTrial)_(\d+)', str(email))
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def collect_notice_candidates():
+    """Scan all active servers and return customers who are near expiry or low remaining data."""
+    now = int(time.time())
+    gb = 1024 * 1024 * 1024
+    alerts = []
+
+    for server in get_active_servers():
+        try:
+            client = XUIClient(server)
+            list_url = f"{client.base_url}/panel/api/inbounds/list"
+            r = client.session.get(list_url, verify=False, timeout=15)
+            rj = r.json()
+
+            if not rj.get('success'):
+                client.login()
+                r = client.session.get(list_url, verify=False, timeout=15)
+                rj = r.json()
+
+            if not rj.get('success'):
+                logging.warning(f"Notice scan failed on {server.get('name')}: {rj}")
+                continue
+
+            for inbound in rj.get('obj', []):
+                try:
+                    settings = json.loads(inbound.get('settings', '{}'))
+                except Exception:
+                    settings = {'clients': []}
+
+                stats_by_email = {}
+                for stat in inbound.get('clientStats') or []:
+                    email = stat.get('email')
+                    if email:
+                        stats_by_email[email] = stat
+
+                for c in settings.get('clients', []):
+                    email = c.get('email', '')
+                    user_id = extract_user_id_from_email(email)
+                    if not user_id:
+                        tgid = str(c.get('tgId', '')).strip()
+                        user_id = int(tgid) if tgid.isdigit() else None
+                    if not user_id:
+                        continue
+
+                    total = int(c.get('totalGB', 0) or 0)
+                    expiry_ms = int(c.get('expiryTime', 0) or 0)
+                    stat = stats_by_email.get(email, {})
+                    up = int(stat.get('up', c.get('up', 0)) or 0)
+                    down = int(stat.get('down', c.get('down', 0)) or 0)
+                    used = up + down
+                    remaining = max(0, total - used)
+
+                    days_left = None
+                    expiring_soon = False
+                    if expiry_ms > 0:
+                        seconds_left = int(expiry_ms / 1000) - now
+                        if seconds_left > 0:
+                            days_left = max(0, seconds_left // 86400)
+                            expiring_soon = seconds_left <= (EXPIRY_NOTICE_DAYS * 86400)
+
+                    low_data_soon = total > 0 and remaining <= (LOW_DATA_NOTICE_GB * gb)
+
+                    if expiring_soon or low_data_soon:
+                        alerts.append({
+                            'user_id': user_id,
+                            'email': email,
+                            'server_name': server.get('name', 'Unknown'),
+                            'days_left': days_left,
+                            'remaining_gb': round(remaining / gb, 2),
+                            'reasons': {
+                                'expiry': expiring_soon,
+                                'low_data': low_data_soon,
+                            }
+                        })
+        except Exception as e:
+            logging.warning(f"Notice scan exception on {server.get('name')}: {e}")
+
+    return alerts
 
 # --- X-UI API CLIENT ---
 class XUIClient:
@@ -549,6 +660,83 @@ async def cleanup_expired_trials(application: Application):
             
     except Exception as e:
         logging.error(f"Error in cleanup_expired_trials: {e}")
+
+
+async def notify_expiring_or_low_data_keys(context: ContextTypes.DEFAULT_TYPE):
+    """Background task: notify customers before key expiry or data depletion."""
+    try:
+        alerts = collect_notice_candidates()
+        if not alerts:
+            logging.info("🔔 Notice job: no users need reminder")
+            return
+
+        notice_state = load_notice_state()
+        now = int(time.time())
+        sent_count = 0
+
+        for alert in alerts:
+            user_id = alert['user_id']
+            email = alert['email']
+            dedup_key = f"{user_id}:{email}"
+
+            user_state = notice_state.get(dedup_key, {})
+            expiry_ok = True
+            low_data_ok = True
+
+            if alert['reasons']['expiry']:
+                last_expiry = int(user_state.get('last_expiry_notice', 0) or 0)
+                expiry_ok = (now - last_expiry) >= NOTICE_COOLDOWN_SECONDS
+            if alert['reasons']['low_data']:
+                last_data = int(user_state.get('last_low_data_notice', 0) or 0)
+                low_data_ok = (now - last_data) >= NOTICE_COOLDOWN_SECONDS
+
+            if not (expiry_ok or low_data_ok):
+                continue
+
+            reasons_text = []
+            if alert['reasons']['expiry'] and expiry_ok:
+                days_left = alert.get('days_left')
+                if days_left is not None:
+                    reasons_text.append(f"⏳ Key သက်တမ်း {days_left} ရက်ခန့်သာ ကျန်ပါသည်")
+            if alert['reasons']['low_data'] and low_data_ok:
+                reasons_text.append(f"📉 Data လက်ကျန် {alert.get('remaining_gb', 0)} GB ခန့်သာ ကျန်ပါသည်")
+
+            if not reasons_text:
+                continue
+
+            msg = (
+                "🔔 <b>VPN အသိပေးချက်</b>\n\n"
+                f"🖥 <b>Server:</b> {alert['server_name']}\n"
+                f"👤 <b>Key:</b> <code>{email}</code>\n\n"
+                + "\n".join(reasons_text) +
+                "\n\n💎 <b>ဆက်လက်အသုံးပြုရန် 1 လစာ သက်တမ်းတိုး/အသစ်ဝယ်နိုင်ပါသည်။</b>\n"
+                "👉 /start ကိုနှိပ်ပြီး <b>1 လစာ (100Gb) ဝယ်ယူမယ်</b> ကိုရွေးပါ။"
+            )
+
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=msg,
+                    parse_mode='HTML',
+                    reply_markup=MAIN_MENU_KB
+                )
+                sent_count += 1
+
+                state_item = notice_state.setdefault(dedup_key, {})
+                if alert['reasons']['expiry'] and expiry_ok:
+                    state_item['last_expiry_notice'] = now
+                if alert['reasons']['low_data'] and low_data_ok:
+                    state_item['last_low_data_notice'] = now
+
+            except Exception as e:
+                logging.warning(f"Failed to send notice to {user_id} for {email}: {e}")
+
+        if sent_count > 0:
+            save_notice_state(notice_state)
+        logging.info(f"🔔 Notice job complete. Sent reminders: {sent_count}")
+
+    except Exception as e:
+        logging.error(f"Error in notify_expiring_or_low_data_keys: {e}")
 
 
 # ... (Previous imports remain)
@@ -1642,6 +1830,14 @@ def main():
             name='cleanup_expired_trials'
         )
         logging.info("✅ Scheduled cleanup_expired_trials job to run every hour")
+
+        job_queue.run_repeating(
+            notify_expiring_or_low_data_keys,
+            interval=6 * 3600,  # every 6 hours
+            first=60,  # start after 1 minute
+            name='notify_expiring_or_low_data_keys'
+        )
+        logging.info("✅ Scheduled notify_expiring_or_low_data_keys job to run every 6 hours")
     else:
         logging.warning("⚠️  JobQueue not available. Install via: pip install 'python-telegram-bot[job-queue]'. Cleanup task will NOT run.")
     
