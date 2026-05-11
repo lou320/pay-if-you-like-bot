@@ -1,13 +1,34 @@
 {
     "servers": [
         {
-            "name": "Server 1",
-            "panel_url": "https://example.com:2053/panel/",
-            "username": "admin",
-            "password": "password",
+            "name": "Server 5",
+            "panel_url": "https://157.245.58.241:1123/CMFDlXH4MnHANUnlRC/",
+            "username": "dyxH3HUC54",
+            "password": "DqwDDcZaKm",
             "inbound_id": 1,
             "flow_limit_gb": 100,
-            "expire_days": 30
+            "expire_days": 30,
+            "region": "singapore"
+        },
+        {
+            "name": "Server 7",
+            "panel_url": "https://206.189.43.191:29401/lcjXRdZbvQDVm9T6f8",
+            "username": "CqsWfNP5gx",
+            "password": "s5E3O4b8au",
+            "inbound_id": 1,
+            "flow_limit_gb": 100,
+            "expire_days": 30,
+            "region": "singapore"
+        },
+        {
+            "name": "Server 8",
+            "panel_url": "https://157.245.60.245:36384/fEjexnhaXNQYznHCQb",
+            "username": "TlApfKcAmg",
+            "password": "jcodDizQMi",
+            "inbound_id": 1,
+            "flow_limit_gb": 100,
+            "expire_days": 30,
+            "region": "singapore"
         }
     ],
     "bot_token": "YOUR_ADMIN_BOT_TOKEN_HERE",

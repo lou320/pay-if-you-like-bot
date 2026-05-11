@@ -50,8 +50,7 @@ Copy the example config and fill in your details:
         }
     ],
     "bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
-    "admin_ids": [12345678, 87654321],
-    "gemini_api_key": "YOUR_GEMINI_API_KEY"
+    "admin_ids": [12345678, 87654321]
 }
 ```
 
