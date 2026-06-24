@@ -24,6 +24,42 @@ logging.info(f"Configuration loaded: {len(SERVERS)} servers, {len(ADMIN_IDS)} ad
 for s in SERVERS:
     logging.debug(f"  Server: {s.get('name')}")
 MAIN_MENU_KB = ReplyKeyboardMarkup([['အစသို့ပြန်သွားပါ']], resize_keyboard=True)
+GREETING_TEXT = (
+    "<b>မင်္ဂလာပါ @PayIfYouLike မှ ကြိုဆိုပါတယ်!</b> 🇲🇲\n\n"
+    "အင်တာနက်လိုင်း ကောင်းမွန်ပြီး လုံခြုံစိတ်ချရတဲ့ VPN ကို ရှာနေပါသလား? "
+    "လူကြီးမင်းအတွက် အကောင်းဆုံး ဝန်ဆောင်မှုပေးဖို့ အသင့်ရှိပါတယ်။\n\n"
+    "💵 <b>Discount တွေလဲရှိတာမို့ များများယူလေတန်လေပဲနော်</b>\n"
+    "\n"
+    "👇 <b>ဘာလုပ်ချင်ပါသလဲ ရွေးချယ်ပေးပါခင်ဗျာ:</b>"
+)
+MAIN_INLINE_KB = [
+    [InlineKeyboardButton("🚀 Free စမ်းသုံးမယ် (24 Hours)", callback_data='get_free')],
+    [InlineKeyboardButton("💎 Premium ဝယ်ယူမယ် (1-6 months)", callback_data='buy_premium')],
+    [InlineKeyboardButton("🔄 Key သက်တမ်းတိုးမည် (Renew)", callback_data='renew_key')],
+    [InlineKeyboardButton("📊 Data လက်ကျန်စစ်မယ်", callback_data='check_quota')],
+    [InlineKeyboardButton("❓ ဘယ်လိုသုံးရမလဲ", callback_data='help')]
+]
+BUY_INTRO_TEXT = (
+    "📌 <b>ဝယ်ယူမည့် လအရေအတွက်ရွေးချယ်ပါ</b>\n\n"
+    "တစ်လချင်းစီတိုင်းအတွက် \n(Data 100GB for 30 days) ရရှိမှာဖြစ်ပါတယ်။\n\n"
+    "1 တစ်လစာ  = 5,000 Ks\n"
+    "2 နှစ်လစာ = 9,500 Ks\n"
+    "3 သုံးလစာ = 13,500 Ks\n"
+    "4 လေးလစာ = 17,000 Ks\n"
+    "5 ငါးလစာ = 20,000 Ks\n"
+    "6 ခြောက်လစာ = 22,500 Ks"
+)
+
+RENEW_INTRO_TEXT = (
+    "📌 <b>သက်တန်းတိုးမည့် လအရေအတွက်ရွေးချယ်ပါ</b>\n\n"
+    "တစ်လချင်းစီတိုင်းအတွက် \n(Data 100GB for 30 days) ရရှိမှာဖြစ်ပါတယ်။\n\n"
+    "1 တစ်လစာ  = 5,000 Ks\n"
+    "2 နှစ်လစာ = 9,500 Ks\n"
+    "3 သုံးလစာ = 13,500 Ks\n"
+    "4 လေးလစာ = 17,000 Ks\n"
+    "5 ငါးလစာ = 20,000 Ks\n"
+    "6 ခြောက်လစာ = 22,500 Ks"
+)
 
 
 # --- HELPER FUNCTIONS ---
@@ -32,6 +68,35 @@ NOTICE_STATE_FILE = 'notice_state.json'
 EXPIRY_NOTICE_DAYS = 3
 LOW_DATA_NOTICE_GB = 2
 NOTICE_COOLDOWN_SECONDS = 24 * 60 * 60
+
+BASE_MONTH_PRICE_KS = 5000
+MONTHLY_DISCOUNT_STEP_KS = 500
+MAX_PURCHASE_MONTHS = 6
+
+
+def calculate_plan(months: int):
+    """Return pricing and entitlement details for a selected month count."""
+    months = max(1, min(MAX_PURCHASE_MONTHS, int(months)))
+    monthly_prices = [max(0, BASE_MONTH_PRICE_KS - (i * MONTHLY_DISCOUNT_STEP_KS)) for i in range(months)]
+    total_ks = sum(monthly_prices)
+    total_gb = months * 100
+    total_days = months * 30
+    return {
+        'months': months,
+        'monthly_prices': monthly_prices,
+        'total_ks': total_ks,
+        'total_gb': total_gb,
+        'total_days': total_days,
+    }
+
+
+def format_plan_for_user(plan: dict):
+    return (
+        f"📅 <b>Plan:</b> {plan['months']} month(s)\n"
+        f"💵 <b>Amount:</b> <b>{plan['total_ks']:,} Ks</b>\n"
+        f"📦 <b>Data:</b> {plan['total_gb']}GB\n"
+        f"⏳ <b>Duration:</b> {plan['total_days']} days"
+    )
 
 
 def get_active_servers():
@@ -456,7 +521,7 @@ class XUIClient:
             logging.error(f"Exception in delete_client_by_email: {e}")
             return False
 
-    def reset_and_extend_client(self, target_uuid: str, expire_days: int = 30):
+    def reset_and_extend_client(self, target_uuid: str, expire_days: int = 30, limit_gb: int = 100):
         """Reset traffic counters to 0 and extend expiry by expire_days from now.
         Returns (True, new_expiry_date_str) on success, (False, error_msg) on failure."""
         import time as _time
@@ -491,7 +556,7 @@ class XUIClient:
             # Set new expiry (from now)
             new_expiry_ms = int((_time.time() * 1000) + (expire_days * 86400 * 1000))
             target_client['expiryTime'] = new_expiry_ms
-            target_client['totalGB']    = 100 * 1024 * 1024 * 1024  # 100 GB
+            target_client['totalGB']    = int(limit_gb) * 1024 * 1024 * 1024
             target_client['enable']     = True
 
             # Push updated client to X-UI
@@ -709,8 +774,8 @@ async def notify_expiring_or_low_data_keys(context: ContextTypes.DEFAULT_TYPE):
                 f"🖥 <b>Server:</b> {alert['server_name']}\n"
                 f"👤 <b>Key:</b> <code>{email}</code>\n\n"
                 + "\n".join(reasons_text) +
-                "\n\n💎 <b>ဆက်လက်အသုံးပြုရန် 1 လစာ သက်တမ်းတိုး/အသစ်ဝယ်နိုင်ပါသည်။</b>\n"
-                "👉 /start ကိုနှိပ်ပြီး <b>1 လစာ (100Gb) ဝယ်ယူမယ်</b> ကိုရွေးပါ။"
+                "\n\n💎 <b>ဆက်လက်အသုံးပြုရန် Premium Plan (1-6 months) ဝယ်နိုင်ပါသည်။</b>\n"
+                "👉 /start ကိုနှိပ်ပြီး <b>Premium ဝယ်ယူမယ် (1-6 months)</b> ကိုရွေးပါ။"
             )
 
             try:
@@ -756,27 +821,8 @@ def parse_payment_slip(text_from_image):
 # --- TELEGRAM BOT LOGIC ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. Send Welcome with Persistent Menu (Bottom)
-    await update.message.reply_text(
-        "<b>မင်္ဂလာပါ @PayIfYouLike မှ ကြိုဆိုပါတယ်!</b> 🇲🇲",
-        parse_mode='HTML',
-        reply_markup=MAIN_MENU_KB
-    )
-
-    # 2. Send Inline Menu (Main Interaction)
-    text = (
-        "အင်တာနက်လိုင်း ကောင်းမွန်ပြီး လုံခြုံစိတ်ချရတဲ့ VPN ကို ရှာနေပါသလား?\n"
-        "လူကြီးမင်းအတွက် အကောင်းဆုံး ဝန်ဆောင်မှုပေးဖို့ အသင့်ရှိပါတယ်။\n\n"
-        "👇 <b>ဘာလုပ်ချင်ပါသလဲ ရွေးချယ်ပေးပါခင်ဗျာ:</b>"
-    )
-    keyboard = [
-        [InlineKeyboardButton("🚀 Free စမ်းသုံးမယ် (24 Hours)", callback_data='get_free')],
-        [InlineKeyboardButton("💎 1 လစာ (100Gb) ဝယ်ယူမယ်", callback_data='buy_premium')],
-        [InlineKeyboardButton("� Key သက်တမ်းတိုးမည် (Renew)", callback_data='renew_key')],
-        [InlineKeyboardButton("�📊 Data လက်ကျန်စစ်မယ်", callback_data='check_quota')],
-        [InlineKeyboardButton("❓ ဘယ်လိုသုံးရမလဲ", callback_data='help')]
-    ]
-    await update.message.reply_html(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    # Send the greeting and inline menu as a single message.
+    await update.message.reply_html(GREETING_TEXT, reply_markup=InlineKeyboardMarkup(MAIN_INLINE_KB))
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
@@ -803,7 +849,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👤 User: {user.full_name} (ID: <code>{user.id}</code>)\n"
             f"🔗 <a href='tg://user?id={user.id}'>Chat with User</a>\n\n"
             f"📋 <b>Email:</b> <code>{renew_info.get('email', 'N/A')}</code>\n"
-            f"🖥 <b>Server:</b> {renew_info.get('server_name', 'N/A')}"
+            f"🖥 <b>Server:</b> {renew_info.get('server_name', 'N/A')}\n"
+            f"📅 <b>Months:</b> {renew_info.get('months', 1)}\n"
+            f"📦 <b>Entitlement:</b> {renew_info.get('total_gb', 100)}GB / {renew_info.get('total_days', 30)} days\n"
+            f"💵 <b>Expected Amount:</b> {renew_info.get('total_ks', 5000):,} Ks"
         )
         keyboard = [[
             InlineKeyboardButton("✅ Approve Renewal", callback_data=f'rnw_ok_{user.id}'),
@@ -821,6 +870,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── Normal new-purchase slip ───────────────────────────────────────────────
+    selected_months = int(context.user_data.get('purchase_months', 1))
+    plan = calculate_plan(selected_months)
+    context.bot_data.setdefault('purchase_pending', {})[str(user.id)] = {
+        'months': plan['months'],
+        'total_ks': plan['total_ks'],
+        'total_gb': plan['total_gb'],
+        'total_days': plan['total_days'],
+    }
+    context.user_data.pop('state', None)
+    context.user_data.pop('purchase_months', None)
+
     await update.message.reply_text(
         "⏳ <b>ငွေလွှဲပြေစာကို Admin သို့ ပေးပို့ထားပါသည်။</b>\n\n"
         "Admin မှ စစ်ဆေးပြီးပါက Key အလိုအလျောက် ရောက်ရှိလာပါမည်။ ခေတ္တစောင့်ဆိုင်းပေးပါ။\n\n"
@@ -831,10 +891,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = (
         f"📩 <b>New Payment Slip!</b>\n\n"
         f"👤 User: {user.full_name} (ID: <code>{user.id}</code>)\n"
-        f"🔗 <a href='tg://user?id={user.id}'>Chat with User</a>"
+        f"🔗 <a href='tg://user?id={user.id}'>Chat with User</a>\n\n"
+        f"📅 <b>Months:</b> {plan['months']}\n"
+        f"📦 <b>Entitlement:</b> {plan['total_gb']}GB / {plan['total_days']} days\n"
+        f"💵 <b>Expected Amount:</b> {plan['total_ks']:,} Ks"
     )
     keyboard = [[
-        InlineKeyboardButton("✅ Approve", callback_data=f'approve_{user.id}'),
+        InlineKeyboardButton("✅ Approve", callback_data=f"approve_{user.id}_{plan['months']}"),
         InlineKeyboardButton("❌ Decline", callback_data=f'decline_{user.id}')
     ]]
     for admin_id in ADMIN_IDS:
@@ -901,6 +964,9 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_uuid  = pending['uuid']
         server_name  = pending.get('server_name', '')
         email        = pending.get('email', '')
+        renew_months = int(pending.get('months', 1))
+        renew_days   = int(pending.get('total_days', 30))
+        renew_gb     = int(pending.get('total_gb', 100))
 
         # Find the right server and extend
         success = False
@@ -909,7 +975,11 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if server.get('name') == server_name:
                 try:
                     xui = XUIClient(server)
-                    success, expiry_date = xui.reset_and_extend_client(target_uuid)
+                    success, expiry_date = xui.reset_and_extend_client(
+                        target_uuid,
+                        expire_days=renew_days,
+                        limit_gb=renew_gb
+                    )
                     if success:
                         break
                 except Exception as e:
@@ -919,7 +989,11 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not success:
             server_obj, xui, resolved_email = find_client_by_uuid(target_uuid)
             if xui:
-                success, expiry_date = xui.reset_and_extend_client(target_uuid)
+                success, expiry_date = xui.reset_and_extend_client(
+                    target_uuid,
+                    expire_days=renew_days,
+                    limit_gb=renew_gb
+                )
 
         # Clean up pending
         context.bot_data.get('renew_pending', {}).pop(str(user_id), None)
@@ -930,8 +1004,9 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=(
                     "✅ <b>Key သက်တမ်းတိုးခြင်း အောင်မြင်ပါသည်။</b>\n\n"
                     f"👤 <b>Email:</b> <code>{email}</code>\n"
+                    f"📅 <b>Plan:</b> {renew_months} month(s)\n"
                     f"📅 <b>New Expiry:</b> {expiry_date}\n"
-                    f"📦 <b>Data:</b> 100GB (Reset to 0)\n\n"
+                    f"📦 <b>Data:</b> {renew_gb}GB (Reset to 0)\n\n"
                     "Key အတူတူပဲ ဆက်သုံးနိုင်ပါပြီ။"
                 ),
                 parse_mode='HTML',
@@ -951,10 +1026,20 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── New premium key approval (approve_USERID / decline_USERID) ────────────
-    action, uid_str = data.split('_', 1)
-    user_id = int(uid_str)
+    parts = data.split('_')
+    action = parts[0]
+    user_id = int(parts[1])
+    selected_months = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else None
 
     if action == 'approve':
+        pending_plan = context.bot_data.get('purchase_pending', {}).pop(str(user_id), None)
+        if pending_plan:
+            plan = calculate_plan(int(pending_plan.get('months', 1)))
+        elif selected_months:
+            plan = calculate_plan(selected_months)
+        else:
+            plan = calculate_plan(1)
+
         # Reconstruct caption with link
         old_text = query.message.caption
         import re
@@ -968,6 +1053,9 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📩 <b>New Payment Slip!</b>\n\n"
             f"👤 User: {user_name} (ID: <code>{user_id}</code>)\n"
             f"🔗 <a href='tg://user?id={user_id}'>Chat with User</a>\n\n"
+            f"📅 <b>Months:</b> {plan['months']}\n"
+            f"📦 <b>Entitlement:</b> {plan['total_gb']}GB / {plan['total_days']} days\n"
+            f"💵 <b>Expected Amount:</b> {plan['total_ks']:,} Ks\n\n"
             f"✅ <b>APPROVED</b>"
         )
 
@@ -987,7 +1075,11 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for server in candidate_servers:
                 try:
                     client = XUIClient(server)
-                    result = client.add_client(email=username, limit_gb=100, expire_days=30)
+                    result = client.add_client(
+                        email=username,
+                        limit_gb=plan['total_gb'],
+                        expire_days=plan['total_days']
+                    )
                     if isinstance(result, tuple):
                         link, existed = result
                     else:
@@ -1004,8 +1096,9 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=user_id,
                     text=(
                         "✅ <b>ငွေလွှဲအောင်မြင်ပါသည်။</b>\n\n"
-                        "💎 <b>Premium Key (1 Month / 100GB):</b>\n"
+                        f"💎 <b>Premium Key ({plan['months']} Month / {plan['total_gb']}GB):</b>\n"
                         f"Server: {target_server.get('name')}\n"
+                        f"Duration: {plan['total_days']} days\n"
                         "👇 <b>အောက်ပါ Key ကို Copy ယူပါ:</b>"
                     ),
                     parse_mode='HTML'
@@ -1091,7 +1184,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "'❓ ဘယ်လိုသုံးရမလဲ' ကို ရွေးပါ။\n\n"
                 "💡 <b>Free Trial သက်တမ်းကုန်ဆုံးပါက Premium ဝယ်ယူအသုံးပြုနိုင်ပါသည်။</b>"
             )
-            upsell_kb = [[InlineKeyboardButton("💎 1 လစာ (100Gb) ဝယ်ယူမယ်", callback_data='buy_premium')]]
+            upsell_kb = [[InlineKeyboardButton("💎 Premium ဝယ်ယူမယ် (1-6 months)", callback_data='buy_premium')]]
             
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
@@ -1188,7 +1281,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "'❓ ဘယ်လိုသုံးရမလဲ' ကို ရွေးပါ။\n\n"
                     "💡 <b>Free Trial သက်တမ်းကုန်ဆုံးပါက Premium ဝယ်ယူအသုံးပြုနိုင်ပါသည်။</b>"
                 )
-                upsell_kb = [[InlineKeyboardButton("💎 1 လစာ (100Gb) ဝယ်ယူမယ်", callback_data='buy_premium')]]
+                upsell_kb = [[InlineKeyboardButton("💎 Premium ဝယ်ယူမယ် (1-6 months)", callback_data='buy_premium')]]
                 
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
@@ -1210,23 +1303,102 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = (
             "🔄 <b>Key သက်တမ်းတိုးခြင်း</b>\n\n"
             "လူကြီးမင်း၏ ရှိပြီးသား <b>VLESS Key</b> ကို ပေးပို့ပါ။\n"
-            "Bot မှ Key ရှိမရှိ စစ်ဆေးပြီး ငွေပေးချေရန်နောက်တစ်ဆင့် ပြသပါမည်။\n\n"
+            "Bot မှ Key ရှိမရှိ စစ်ဆေးပြီး လအရေအတွက် ရွေးချယ်ရန် ပြသပါမည်။\n\n"
             "<i>(Key အစအဆုံး <code>vless://...</code> မှစ၍ Copy ကူးထည့်ပါ)</i>"
         )
         keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]]
         await query.edit_message_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    elif query.data == 'buy_premium':
-        # Payment Instructions
+    elif query.data.startswith('renew_month_'):
+        selected_months = int(query.data.split('_')[-1])
+        plan = calculate_plan(selected_months)
+
+        renew_info = context.user_data.get('renew_info', {})
+        if not renew_info.get('uuid'):
+            await query.edit_message_text(
+                "⚠️ သက်တမ်းတိုးမည့် Key အချက်အလက် မတွေ့ပါ။ ပြန်လည်စတင်ပြီး Key ကို ထပ်ပို့ပေးပါ။",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]])
+            )
+            return
+
+        renew_info.update({
+            'months': plan['months'],
+            'total_ks': plan['total_ks'],
+            'total_gb': plan['total_gb'],
+            'total_days': plan['total_days'],
+        })
+        context.user_data['renew_info'] = renew_info
+        context.user_data['state'] = 'awaiting_renew_slip'
+
         msg = (
-            "💎 <b>1လစာ ဝယ်ယူမည်</b>\n\n"
-            "အောက်ပါ KPay အကောင့်သို့ <b>5,000 Ks</b> လွှဲပေးပါ။\n\n"
-            "📞 <b>09799881201</b> (Daw Tin Tin Yee)\n"
-            "📝 Note နေရာတွင် <code>Payment</code> လို့ပဲထည့်ပေးပါနော် တခြားဘာမှမထည့်ပါနဲ့ဗျ\n\n"
-            "✅ <b>ငွေလွှဲပြီးပါက ငွေလွှဲပြေစာ (Slip) ဓာတ်ပုံကို ဒီ Bot သို့ ပို့ပေးပါ။ စစ်ဆေးပြီး Key ပို့ပေးပါမည်။</b>\n"
+            "🔄 <b>သက်တမ်းတိုးမည် Plan အသေးစိတ်</b>\n\n"
+            + format_plan_for_user(plan)
+            + "\n\n"
+            + f"အောက်ပါ KPay အကောင့်သို့ {plan['total_ks']:,} လွှဲပေးပါ။\n\n"
+            + "📞 <b>09799881201</b> (Daw Tin Tin Yee)\n"
+            + "📝 Note နေရာတွင် <code>Payment</code> လို့ပဲထည့်ပေးပါနော် တခြားဘာမှမထည့်ပါနဲ့ဗျ\n\n"
+            + "✅ <b>ငွေလွှဲပြီးပါက ငွေလွှဲပြေစာ (Slip) ဓာတ်ပုံကို ဒီ Bot သို့ ပို့ပေးပါ။ Admin မှ စစ်ဆေးပြီး Key သက်တမ်းတိုးပေးပါမည်။</b>\n"
         )
-        keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]]
+        keyboard = [
+            [InlineKeyboardButton("🔁 Change Month", callback_data='renew_choose_month')],
+            [InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]
+        ]
+        await query.edit_message_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    elif query.data == 'renew_choose_month':
+        renew_info = context.user_data.get('renew_info', {})
+        if not renew_info.get('uuid'):
+            await query.edit_message_text(
+                "⚠️ သက်တမ်းတိုးမည့် Key အချက်အလက် မတွေ့ပါ။ ပြန်လည်စတင်ပြီး Key ကို ထပ်ပို့ပေးပါ။",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]])
+            )
+            return
+
+        context.user_data['state'] = 'awaiting_renew_month'
+        keyboard = [
+            [InlineKeyboardButton("1 Month", callback_data='renew_month_1'), InlineKeyboardButton("2 Months", callback_data='renew_month_2')],
+            [InlineKeyboardButton("3 Months", callback_data='renew_month_3'), InlineKeyboardButton("4 Months", callback_data='renew_month_4')],
+            [InlineKeyboardButton("5 Months", callback_data='renew_month_5'), InlineKeyboardButton("6 Months", callback_data='renew_month_6')],
+            [InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]
+        ]
+        await query.edit_message_text(RENEW_INTRO_TEXT, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    elif query.data == 'buy_premium':
+        # Month selection (1-6)
+        keyboard = [
+            [InlineKeyboardButton("1 Month", callback_data='buy_month_1'), InlineKeyboardButton("2 Months", callback_data='buy_month_2')],
+            [InlineKeyboardButton("3 Months", callback_data='buy_month_3'), InlineKeyboardButton("4 Months", callback_data='buy_month_4')],
+            [InlineKeyboardButton("5 Months", callback_data='buy_month_5'), InlineKeyboardButton("6 Months", callback_data='buy_month_6')],
+            [InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]
+        ]
+
+        msg = BUY_INTRO_TEXT
+        await query.edit_message_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith('buy_month_'):
+        selected_months = int(query.data.split('_')[-1])
+        plan = calculate_plan(selected_months)
+        context.user_data['state'] = 'awaiting_purchase_slip'
+        context.user_data['purchase_months'] = plan['months']
+
+        msg = (
+            "💎 <b>ဝယ်ယူမည် Plan အသေးစိတ်</b>\n\n"
+            + format_plan_for_user(plan)
+            + "\n\n"
+            + f"အောက်ပါ KPay အကောင့်သို့ {plan['total_ks']:,} လွှဲပေးပါ။\n\n"
+            + "📞 <b>09799881201</b> (Daw Tin Tin Yee)\n"
+            + "📝 Note နေရာတွင် <code>Payment</code> လို့ပဲထည့်ပေးပါနော် တခြားဘာမှမထည့်ပါနဲ့ဗျ\n\n"
+            + "✅ <b>ငွေလွှဲပြီးပါက ငွေလွှဲပြေစာ (Slip) ဓာတ်ပုံကို ဒီ Bot သို့ ပို့ပေးပါ။ စစ်ဆေးပြီး Key ပို့ပေးပါမည်။</b>\n"
+        )
+        keyboard = [
+            [InlineKeyboardButton("🔁 Change Month", callback_data='buy_premium')],
+            [InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]
+        ]
         await query.edit_message_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == 'help':
@@ -1329,19 +1501,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == 'main_menu':
         # Re-send the start message
-        text = (
-            "<b>မင်္ဂလာပါ @PayIfYouLike မှ ကြိုဆိုပါတယ်!</b> 🇲🇲\n\n"
-            "အင်တာနက်လိုင်း ကောင်းမွန်ပြီး လုံခြုံစိတ်ချရတဲ့ VPN ကို ရှာနေပါသလား?\n"
-            "လူကြီးမင်းအတွက် အကောင်းဆုံး ဝန်ဆောင်မှုပေးဖို့ အသင့်ရှိပါတယ်။\n\n"
-            "👇 <b>ဘာလုပ်ချင်ပါသလဲ ရွေးချယ်ပေးပါခင်ဗျာ:</b>"
-        )
-        keyboard = [
-            [InlineKeyboardButton("🚀 Free စမ်းသုံးမယ် (24 Hours)", callback_data='get_free')],
-            [InlineKeyboardButton("💎 1 လစာ (100Gb) ဝယ်ယူမယ်", callback_data='buy_premium')],
-            [InlineKeyboardButton("📊 Data လက်ကျန်စစ်မယ်", callback_data='check_quota')],
-            [InlineKeyboardButton("❓ ဘယ်လိုသုံးရမလဲ", callback_data='help')]
-        ]
-        await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(GREETING_TEXT, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(MAIN_INLINE_KB))
 
 # --- ADMIN COMMANDS ---
 
@@ -1490,24 +1650,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Key is valid — store info and ask for payment slip
-        context.user_data['state']      = 'awaiting_renew_slip'
+        # Key is valid — store info and ask for renewal month selection
+        context.user_data['state']      = 'awaiting_renew_month'
         context.user_data['renew_info'] = {
             'uuid':        target_uuid,
             'email':       email,
             'server_name': server_obj.get('name', ''),
         }
-        context.user_data.pop('state', None)   # will be re-set below
-        context.user_data['state'] = 'awaiting_renew_slip'
+        keyboard = [
+            [InlineKeyboardButton("1 Month", callback_data='renew_month_1'), InlineKeyboardButton("2 Months", callback_data='renew_month_2')],
+            [InlineKeyboardButton("3 Months", callback_data='renew_month_3'), InlineKeyboardButton("4 Months", callback_data='renew_month_4')],
+            [InlineKeyboardButton("5 Months", callback_data='renew_month_5'), InlineKeyboardButton("6 Months", callback_data='renew_month_6')],
+            [InlineKeyboardButton("🔙 Back to Menu", callback_data='main_menu')]
+        ]
 
         await status_msg.edit_text(
-            f"✅ <b>Key တွေ့ပါသည်!</b>\n\n"
-            "💳 <b>ငွေပေးချေရန်</b>\n"
-            "အောက်ပါ KPay အကောင့်သို့ <b>5,000 Ks</b> လွှဲပေးပါ။\n\n"
-            "📞 <b>09799881201</b> (Daw Tin Tin Yee)\n"
-            "📝 Note နေရာတွင် <code>Payment</code> လို့ပဲထည့်ပေးပါနော် တခြားဘာမှမထည့်ပါနဲ့ဗျ\n\n"
-            "✅ <b>ငွေလွှဲပြီးပါက ငွေလွှဲပြေစာ (Slip) ဓာတ်ပုံကို ဒီ Bot သို့ ပို့ပေးပါ။ Admin မှ စစ်ဆေးပြီး Key သက်တမ်းတိုးပေးပါမည်။</b>\n",
-            parse_mode='HTML'
+            "✅ <b>Key တွေ့ပါသည်!</b>\n\n"
+            + RENEW_INTRO_TEXT,
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
 
@@ -1763,6 +1924,17 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # ── New purchase slip (file) ───────────────────────────────────────────
+        selected_months = int(context.user_data.get('purchase_months', 1))
+        plan = calculate_plan(selected_months)
+        context.bot_data.setdefault('purchase_pending', {})[str(user.id)] = {
+            'months': plan['months'],
+            'total_ks': plan['total_ks'],
+            'total_gb': plan['total_gb'],
+            'total_days': plan['total_days'],
+        }
+        context.user_data.pop('state', None)
+        context.user_data.pop('purchase_months', None)
+
         await update.message.reply_text(
             "⏳ <b>ငွေလွှဲပြေစာကို Admin သို့ ပေးပို့ထားပါသည်။</b>\n\n"
             "Admin မှ စစ်ဆေးပြီးပါက Key အလိုအလျောက် ရောက်ရှိလာပါမည်။ ခေတ္တစောင့်ဆိုင်းပေးပါ။\n\n"
@@ -1773,10 +1945,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = (
             f"📩 <b>New Payment Slip (File)!</b>\n\n"
             f"👤 User: {user.full_name} (ID: <code>{user.id}</code>)\n"
-            f"🔗 <a href='tg://user?id={user.id}'>Chat with User</a>"
+            f"🔗 <a href='tg://user?id={user.id}'>Chat with User</a>\n\n"
+            f"📅 <b>Months:</b> {plan['months']}\n"
+            f"📦 <b>Entitlement:</b> {plan['total_gb']}GB / {plan['total_days']} days\n"
+            f"💵 <b>Expected Amount:</b> {plan['total_ks']:,} Ks"
         )
         keyboard = [[
-            InlineKeyboardButton("✅ Approve", callback_data=f'approve_{user.id}'),
+            InlineKeyboardButton("✅ Approve", callback_data=f"approve_{user.id}_{plan['months']}"),
             InlineKeyboardButton("❌ Decline", callback_data=f'decline_{user.id}')
         ]]
         for admin_id in ADMIN_IDS:
