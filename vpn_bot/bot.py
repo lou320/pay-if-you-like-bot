@@ -121,15 +121,65 @@ def save_rotation_state(state):
         logging.warning(f"Failed to persist rotation state: {e}")
 
 
+def get_server_active_client_count(server):
+    """Return active client count for one server; None on fetch failure.
+
+    Active means enabled and not expired.
+    """
+    try:
+        client = XUIClient(server)
+        inbound_url = f"{client.base_url}/panel/api/inbounds/get/{client.inbound_id}"
+        r = client.session.get(inbound_url, verify=False, timeout=15)
+        rj = r.json()
+
+        if not rj.get('success'):
+            client.login()
+            r = client.session.get(inbound_url, verify=False, timeout=15)
+            rj = r.json()
+
+        if not rj.get('success'):
+            return None
+
+        inbound = rj.get('obj', {})
+        settings = json.loads(inbound.get('settings', '{}'))
+        now_ms = int(time.time() * 1000)
+
+        active_count = 0
+        for c in settings.get('clients', []):
+            enabled = bool(c.get('enable', True))
+            expiry_ms = int(c.get('expiryTime', 0) or 0)
+            not_expired = (expiry_ms <= 0) or (expiry_ms > now_ms)
+            if enabled and not_expired:
+                active_count += 1
+
+        return active_count
+    except Exception as e:
+        logging.warning(f"Failed to fetch active client count for {server.get('name')}: {e}")
+        return None
+
+
 def get_round_robin_servers():
-    """Return active servers ordered by round-robin and advance pointer for equal distribution."""
+    """Return active servers ordered by least load with round-robin tie-breaks."""
     servers = get_active_servers()
     if not servers:
         return []
 
     state = load_rotation_state()
     start_idx = int(state.get('next_index', 0)) % len(servers)
-    ordered = servers[start_idx:] + servers[:start_idx]
+    rotated = servers[start_idx:] + servers[:start_idx]
+
+    scored_servers = []
+    for server in rotated:
+        count = get_server_active_client_count(server)
+        # Unknown counts go to the end so healthy, measurable servers are preferred.
+        sort_count = count if count is not None else 10 ** 9
+        scored_servers.append((sort_count, server, count))
+
+    scored_servers.sort(key=lambda x: x[0])
+    ordered = [item[1] for item in scored_servers]
+
+    load_log = [f"{s.get('name')}={c if c is not None else 'unknown'}" for _, s, c in scored_servers]
+    logging.info(f"Load-balanced server order: {load_log}")
 
     state['next_index'] = (start_idx + 1) % len(servers)
     save_rotation_state(state)
@@ -1197,7 +1247,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚙️ <b>Key ထုတ်ပေးနေပါသည်... ခဏစောင့်ပါ...</b>", parse_mode='HTML')
 
         candidate_servers = get_round_robin_servers()
-        logging.info(f"Round-robin candidates for free trial: {[s.get('name') for s in candidate_servers]}")
+        logging.info(f"Load-balanced candidates for free trial: {[s.get('name') for s in candidate_servers]}")
 
         if not candidate_servers:
             await query.edit_message_text(

@@ -5,6 +5,8 @@ import secrets
 import string
 import requests
 import asyncio
+import time
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 import telegram
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
@@ -28,6 +30,219 @@ SERVERS = CONFIG['servers']
 ADMIN_IDS = CONFIG['admin_ids']
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+INACTIVE_DAYS_THRESHOLD = 7
+INACTIVE_CACHE_TTL_SECONDS = 30 * 60
+INACTIVE_CARD_LIMIT = 40
+
+
+def get_active_servers():
+    enabled = [s for s in SERVERS if s.get('enabled', True)]
+    return enabled if enabled else SERVERS
+
+
+def format_expiry(expiry_ms):
+    if int(expiry_ms or 0) <= 0:
+        return "Never"
+    try:
+        return datetime.fromtimestamp(int(expiry_ms) / 1000).strftime('%Y-%m-%d')
+    except Exception:
+        return "Unknown"
+
+
+def format_last_online(last_online_ms):
+    if not last_online_ms:
+        return "Unknown"
+    try:
+        return datetime.fromtimestamp(int(last_online_ms) / 1000).strftime('%Y-%m-%d %H:%M')
+    except Exception:
+        return "Unknown"
+
+
+def normalize_last_online_ms(raw_value):
+    """Normalize last-online timestamp to milliseconds if present."""
+    try:
+        value = int(raw_value or 0)
+    except Exception:
+        return 0
+    if value <= 0:
+        return 0
+    # Heuristic: values smaller than 10^12 are very likely seconds.
+    if value < 10**12:
+        return value * 1000
+    return value
+
+
+def collect_inactive_users():
+    """Return users that are expired, disabled, unused, or inactive for 7+ days."""
+    gb = 1024 * 1024 * 1024
+    now_ms = int(time.time() * 1000)
+    week_ms = INACTIVE_DAYS_THRESHOLD * 24 * 60 * 60 * 1000
+    inactive = []
+
+    for server in get_active_servers():
+        try:
+            client = XUIClient(server)
+            inbound_url = f"{client.base_url}/panel/api/inbounds/get/{client.inbound_id}"
+            r = client.session.get(inbound_url, verify=False, timeout=15)
+            rj = r.json()
+
+            if not rj.get('success'):
+                client.login()
+                r = client.session.get(inbound_url, verify=False, timeout=15)
+                rj = r.json()
+
+            if not rj.get('success'):
+                logging.warning(f"Inactive scan failed on {server.get('name')}: {rj}")
+                continue
+
+            inbound = rj.get('obj', {})
+            settings = json.loads(inbound.get('settings', '{}'))
+            stats_by_email = {}
+            for stat in inbound.get('clientStats') or []:
+                email = stat.get('email')
+                if email:
+                    stats_by_email[email] = stat
+
+            for c in settings.get('clients', []):
+                email = c.get('email', 'N/A')
+                expiry_ms = int(c.get('expiryTime', 0) or 0)
+                enabled = bool(c.get('enable', True))
+                total = int(c.get('totalGB', 0) or 0)
+
+                stat = stats_by_email.get(email, {})
+                up = int(stat.get('up', c.get('up', 0)) or 0)
+                down = int(stat.get('down', c.get('down', 0)) or 0)
+                used = up + down
+                remaining = max(0, total - used)
+                last_online_ms = normalize_last_online_ms(stat.get('lastOnline') or c.get('lastOnline'))
+
+                is_expired = expiry_ms > 0 and expiry_ms <= now_ms
+                is_disabled = not enabled
+                is_unused = used == 0
+                expired_over_week = expiry_ms > 0 and (now_ms - expiry_ms) >= week_ms
+                inactive_over_week = last_online_ms > 0 and (now_ms - last_online_ms) >= week_ms
+
+                reasons = []
+                if is_expired:
+                    reasons.append('expired')
+                if is_disabled:
+                    reasons.append('disabled')
+                if is_unused:
+                    reasons.append('unused')
+                if expired_over_week or inactive_over_week:
+                    reasons.append('inactive_7d')
+
+                if reasons:
+                    inactive.append({
+                        'email': email,
+                        'server': server.get('name', 'Unknown'),
+                        'panel_url': server.get('panel_url', ''),
+                        'inbound_id': int(server.get('inbound_id', 0) or 0),
+                        'reasons': reasons,
+                        'used_gb': round(used / gb, 2),
+                        'total_gb': round(total / gb, 2),
+                        'remaining_gb': round(remaining / gb, 2),
+                        'status': 'Inactive',
+                        'last_online_ms': last_online_ms,
+                        'last_online': format_last_online(last_online_ms),
+                        'expiry': format_expiry(expiry_ms),
+                    })
+        except Exception as e:
+            logging.warning(f"Inactive scan exception on {server.get('name')}: {e}")
+
+    inactive.sort(key=lambda x: (x['server'], x['email']))
+    return inactive
+
+
+def build_inactive_report(rows, max_rows=60):
+    if not rows:
+        return "✅ <b>No inactive users found.</b>"
+
+    lines = [
+        f"🧊 <b>Inactive Users</b>\nTotal: <b>{len(rows)}</b>\n",
+        "Format: <code>email | server | reasons | usedGB | expiry</code>\n"
+    ]
+
+    for idx, row in enumerate(rows[:max_rows], start=1):
+        reasons = ','.join(row['reasons'])
+        lines.append(
+            f"{idx}. <code>{row['email']} | {row['server']} | {reasons} | {row['used_gb']} | {row['expiry']}</code>"
+        )
+
+    if len(rows) > max_rows:
+        lines.append(f"\n... showing first {max_rows} of {len(rows)} users")
+
+    return "\n".join(lines)
+
+
+def build_inactive_card(row):
+    reasons_text = ', '.join(row.get('reasons', []))
+    return (
+        "📊 <b>Inactive User Status</b>\n\n"
+        f"👤 <b>Name:</b> {row.get('email', 'N/A')}\n"
+        f"🖥 <b>Server:</b> {row.get('server', 'Unknown')}\n"
+        f"🔋 <b>Status:</b> ❌ {row.get('status', 'Inactive')}\n\n"
+        f"📦 <b>Total:</b> {row.get('total_gb', 0)} GiB\n"
+        f"📉 <b>Used:</b> {row.get('used_gb', 0)} GiB\n"
+        f"📈 <b>Remaining:</b> {row.get('remaining_gb', 0)} GiB\n\n"
+        f"⏳ <b>Expires:</b> {row.get('expiry', 'Unknown')}\n"
+        f"🕒 <b>Last Active:</b> {row.get('last_online', 'Unknown')}\n"
+        f"⚠️ <b>Reason:</b> {reasons_text}"
+    )
+
+
+def cache_inactive_rows(context: ContextTypes.DEFAULT_TYPE, rows):
+    now = int(time.time())
+    cache = context.bot_data.setdefault('inactive_cache', {})
+
+    # Evict stale cache items first.
+    stale_keys = [k for k, v in cache.items() if (now - int(v.get('ts', 0))) > INACTIVE_CACHE_TTL_SECONDS]
+    for key in stale_keys:
+        cache.pop(key, None)
+
+    tokens = []
+    for row in rows:
+        token = secrets.token_hex(4)
+        while token in cache:
+            token = secrets.token_hex(4)
+        cache[token] = {'row': row, 'ts': now}
+        tokens.append((token, row))
+    return tokens
+
+
+async def send_inactive_cards(chat_id: int, context: ContextTypes.DEFAULT_TYPE, rows):
+    if not rows:
+        await context.bot.send_message(chat_id=chat_id, text="✅ <b>No inactive users found.</b>", parse_mode='HTML')
+        return
+
+    limited_rows = rows[:INACTIVE_CARD_LIMIT]
+    tokens = cache_inactive_rows(context, limited_rows)
+
+    summary = (
+        f"🧊 <b>Inactive Users: {len(rows)}</b>\n"
+        f"Showing: <b>{len(limited_rows)}</b>\n"
+        "Tap <b>Delete</b> under a user card to remove that account."
+    )
+    if len(rows) > INACTIVE_CARD_LIMIT:
+        summary += f"\n\n(Showing first {INACTIVE_CARD_LIMIT} users)"
+
+    await context.bot.send_message(chat_id=chat_id, text=summary, parse_mode='HTML')
+
+    for token, row in tokens:
+        keyboard = [[InlineKeyboardButton("🗑 Delete", callback_data=f"inactdel_{token}")]]
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=build_inactive_card(row),
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+async def send_inactive_report(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    rows = collect_inactive_users()
+    report = build_inactive_report(rows)
+    await context.bot.send_message(chat_id=chat_id, text=report, parse_mode='HTML')
 
 # --- X-UI API CLIENT ---
 class XUIClient:
@@ -110,6 +325,58 @@ class XUIClient:
             logging.error(f"XUI Client Error: {e}")
             return None
 
+    def delete_client_by_email(self, email):
+        """Delete one client from this inbound by email."""
+        try:
+            list_url = f"{self.base_url}/panel/api/inbounds/get/{self.inbound_id}"
+            r = self.session.get(list_url, verify=False, timeout=15)
+            rj = r.json()
+
+            if not rj.get('success'):
+                self.login()
+                r = self.session.get(list_url, verify=False, timeout=15)
+                rj = r.json()
+
+            if not rj.get('success'):
+                logging.error(f"Delete failed to fetch inbound: {rj}")
+                return False
+
+            inbound = rj.get('obj', {})
+            settings = json.loads(inbound.get('settings', '{}'))
+            clients = settings.get('clients', [])
+
+            original_count = len(clients)
+            settings['clients'] = [c for c in clients if c.get('email') != email]
+            if len(settings['clients']) == original_count:
+                logging.warning(f"Client not found for delete: {email}")
+                return False
+
+            payload = {
+                "id": self.inbound_id,
+                "settings": json.dumps(settings)
+            }
+            candidate_urls = [
+                f"{self.base_url}/panel/api/inbounds/update/{self.inbound_id}",
+                f"{self.base_url}/panel/api/inbounds/{self.inbound_id}",
+            ]
+
+            for update_url in candidate_urls:
+                try:
+                    r = self.session.post(update_url, json=payload, verify=False, timeout=15)
+                    resp = r.json()
+                except Exception:
+                    continue
+
+                if resp.get('success'):
+                    logging.info(f"Deleted client {email} from {self.base_url}")
+                    return True
+
+            logging.error(f"Delete update failed for {email} on all endpoints")
+            return False
+        except Exception as e:
+            logging.error(f"delete_client_by_email exception: {e}")
+            return False
+
 # --- TELEGRAM BOT LOGIC ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -121,10 +388,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("➕ Generate 1 Month Key", callback_data='admin_gen_1m')],
         [InlineKeyboardButton("⚡️ Generate Trial Key", callback_data='admin_gen_trial')],
+        [InlineKeyboardButton("🧊 Inactive Users", callback_data='admin_inactive_users')],
         [InlineKeyboardButton("⚙️ Manage Servers", callback_data='admin_manage_menu')],
         [InlineKeyboardButton("🔌 Add New Server", callback_data='admin_add_server')]
     ]
     await update.message.reply_text("👑 <b>Admin Control Panel</b>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def inactive_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔️ This bot is for Admins only.")
+        return
+
+    wait_msg = await update.message.reply_text("🔍 Scanning inactive users across servers...")
+    rows = collect_inactive_users()
+    await wait_msg.edit_text(f"✅ Found {len(rows)} inactive users. Sending cards...")
+    await send_inactive_cards(update.effective_chat.id, context, rows)
 
 async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Ensure we modify the module-level config and servers
@@ -132,6 +412,10 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
     await query.answer()
+
+    if query.from_user.id not in ADMIN_IDS:
+        await query.edit_message_text("⛔️ This bot is for Admins only.")
+        return
     
     # Cancel button handler
     if query.data == 'admin_cancel':
@@ -334,6 +618,67 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("🔙 Back", callback_data='admin_back')]]
         await query.edit_message_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
+    elif query.data == 'admin_inactive_users':
+        await query.edit_message_text("🔍 Scanning inactive users across servers...", parse_mode='HTML')
+        rows = collect_inactive_users()
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data='admin_back')]]
+        await query.edit_message_text(
+            f"✅ Found {len(rows)} inactive users. Sending cards below.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        await send_inactive_cards(query.message.chat_id, context, rows)
+
+    elif query.data.startswith('inactdel_'):
+        token = query.data.split('_', 1)[1]
+        cache = context.bot_data.get('inactive_cache', {})
+        cached = cache.get(token)
+
+        if not cached:
+            await query.edit_message_text("⚠️ This delete action is expired. Please refresh inactive users list.", parse_mode='HTML')
+            return
+
+        age = int(time.time()) - int(cached.get('ts', 0))
+        if age > INACTIVE_CACHE_TTL_SECONDS:
+            cache.pop(token, None)
+            await query.edit_message_text("⚠️ This delete action is expired. Please refresh inactive users list.", parse_mode='HTML')
+            return
+
+        row = cached.get('row', {})
+        email = row.get('email')
+        panel_url = str(row.get('panel_url', '')).rstrip('/')
+        inbound_id = int(row.get('inbound_id', 0) or 0)
+
+        target_server = None
+        for server in SERVERS:
+            if str(server.get('panel_url', '')).rstrip('/') == panel_url and int(server.get('inbound_id', 0) or 0) == inbound_id:
+                target_server = server
+                break
+
+        if not target_server:
+            await query.edit_message_text(
+                f"❌ Could not find target server for <code>{email}</code>.",
+                parse_mode='HTML'
+            )
+            return
+
+        client = XUIClient(target_server)
+        deleted = client.delete_client_by_email(email)
+        cache.pop(token, None)
+
+        if deleted:
+            await query.edit_message_text(
+                f"🗑 <b>Deleted inactive user</b>\n\n"
+                f"👤 <code>{email}</code>\n"
+                f"🖥 {target_server.get('name', 'Unknown')}",
+                parse_mode='HTML'
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ Failed to delete <code>{email}</code>. It may already be removed.",
+                parse_mode='HTML'
+            )
+
     elif query.data == 'admin_back':
         await start(update, context) # Reuse start logic
 
@@ -443,6 +788,8 @@ def main():
     # the JSON file.
     app = Application.builder().token(ADMIN_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("inactive_users", inactive_users_command))
+    app.add_handler(CommandHandler("inactive", inactive_users_command))
     app.add_handler(CallbackQueryHandler(admin_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     # Centralized error handler to log exceptions from handlers
