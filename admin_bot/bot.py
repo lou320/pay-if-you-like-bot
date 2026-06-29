@@ -1,5 +1,6 @@
 import logging
 import json
+import copy
 import uuid
 import secrets
 import string
@@ -34,6 +35,60 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 INACTIVE_DAYS_THRESHOLD = 7
 INACTIVE_CACHE_TTL_SECONDS = 30 * 60
 INACTIVE_CARD_LIMIT = 40
+
+AUTO_INBOUND_TEMPLATE = {
+    "listen": "",
+    "port": 443,
+    "protocol": "vless",
+    "tag": "in-443-tcp",
+    "settings": {
+        "clients": [],
+        "decryption": "none",
+        "encryption": "none",
+        "testseed": [900, 500, 900, 256]
+    },
+    "sniffing": {
+        "enabled": False
+    },
+    "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "tcpSettings": {
+            "acceptProxyProtocol": False,
+            "header": {
+                "type": "none"
+            }
+        },
+        "realitySettings": {
+            "show": False,
+            "xver": 0,
+            "target": "www.intel.com:443",
+            "serverNames": ["www.intel.com"],
+            "privateKey": "KNI8EUr5yAB1Y6k_5TXYMFtT_gm0WIoW_OE7ha3ABW4",
+            "minClientVer": "",
+            "maxClientVer": "",
+            "maxTimediff": 0,
+            "shortIds": [
+                "20ceb823",
+                "c0ffa938065bb4",
+                "b4ff353fa8",
+                "770a83",
+                "215485f50876d389",
+                "45",
+                "1de7a68a30e0",
+                "0e11"
+            ],
+            "mldsa65Seed": "",
+            "settings": {
+                "publicKey": "5SOnt8lwpb7hd8y8Ei8qMGmDZYajkpCivhtPBWSS20k",
+                "fingerprint": "chrome",
+                "serverName": "",
+                "spiderX": "/",
+                "mldsa65Verify": ""
+            }
+        }
+    }
+}
 
 
 def get_active_servers():
@@ -304,6 +359,13 @@ class XUIClient:
             f"{self.base_url}/xui/api/inbounds/addClient",
         ]
 
+    def _inbound_create_urls(self):
+        return [
+            f"{self.base_url}/panel/api/inbounds/add",
+            f"{self.base_url}/xui/API/inbounds/add",
+            f"{self.base_url}/xui/api/inbounds/add",
+        ]
+
     def _fetch_inbound(self, inbound_id):
         for url in self._inbound_get_urls(inbound_id):
             data = self._try_get_json(url)
@@ -359,6 +421,30 @@ class XUIClient:
                 return self.inbound_id
 
         return self.inbound_id
+
+    def create_auto_inbound(self, remark: str = "Auto-Inbound", port: int = 443):
+        payload = copy.deepcopy(AUTO_INBOUND_TEMPLATE)
+        payload["remark"] = remark
+        payload["port"] = int(port)
+        payload["tag"] = f"in-{int(port)}-tcp"
+
+        responses = []
+        for url in self._inbound_create_urls():
+            resp = self._try_post_json(url, payload)
+            if resp:
+                responses.append(resp)
+            if isinstance(resp, dict) and resp.get("success"):
+                detected_id = self.discover_preferred_inbound_id()
+                self.inbound_id = int(detected_id)
+                return True, int(detected_id), "Inbound created"
+
+        err_msg = ""
+        for resp in responses:
+            if isinstance(resp, dict) and resp.get("msg"):
+                err_msg = str(resp.get("msg"))
+                break
+        self.last_error = err_msg or "Failed to create inbound (API rejected request)."
+        return False, None, self.last_error
 
     def add_client(self, email, limit_gb=0, expire_days=0):
         try:
@@ -633,6 +719,8 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         block_renew_txt = "🔄 Allow VPN Renewals" if vpn_block_renewals else "🔄 Block VPN Renewals"
         keyboard.append([InlineKeyboardButton(block_renew_txt, callback_data=f'toggle_vpn_renew_{idx}')])
+
+        keyboard.append([InlineKeyboardButton("🧩 Create Inbound Auto", callback_data=f'create_inb_{idx}')])
             
         # Delete
         keyboard.append([InlineKeyboardButton("🗑 Delete Server", callback_data=f'del_srv_{idx}')])
@@ -729,6 +817,47 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         query.data = f'manage_srv_{idx}'
         await admin_handler(update, context)
+        return
+
+    elif query.data.startswith('create_inb_'):
+        idx = int(query.data.split('_')[-1])
+        CONFIG = load_config()
+        SERVERS = CONFIG['servers']
+
+        if idx >= len(SERVERS):
+            await query.edit_message_text("❌ Server not found.")
+            return
+
+        s = SERVERS[idx]
+        client = XUIClient(s)
+        ok, detected_id, detail = client.create_auto_inbound(
+            remark=s.get('name', f"Server {idx+1}"),
+            port=443
+        )
+
+        if not ok:
+            await query.edit_message_text(
+                f"❌ Failed to create inbound on <b>{s.get('name')}</b>.\n\n"
+                f"Reason: <code>{detail}</code>",
+                parse_mode='HTML'
+            )
+            keyboard = [[InlineKeyboardButton("🔙 Back", callback_data=f'manage_srv_{idx}')]]
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+
+        s['inbound_id'] = int(detected_id)
+        SERVERS[idx] = s
+        CONFIG['servers'] = SERVERS
+        with open('../config.json', 'w') as f:
+            json.dump(CONFIG, f, indent=4)
+
+        await query.edit_message_text(
+            f"✅ Inbound created on <b>{s.get('name')}</b>.\n"
+            f"🆔 Inbound ID set to: <b>{detected_id}</b>",
+            parse_mode='HTML'
+        )
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data=f'manage_srv_{idx}')]]
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
     elif query.data.startswith('del_srv_'):
