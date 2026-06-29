@@ -585,7 +585,7 @@ class XUIClient:
 
                 if pbk and sni and sid:
                     return (f"vless://{uuid_val}@{ip}:{port}"
-                            f"?type=tcp&security=reality&pbk={pbk}&fp=chrome"
+                            f"?type=tcp&security=reality&encryption=none&pbk={pbk}&fp=chrome"
                             f"&sni={sni}&sid={sid}&spx=%2F&flow=xtls-rprx-vision#{remark_val}")
                 else:
                     # Fallback for ws or tcp without reality
@@ -595,11 +595,11 @@ class XUIClient:
                         path = ws.get('path', '/')
                         headers = ws.get('headers') or {}
                         host = headers.get('Host') or None
-                        params = f"type=ws&security=none&path={path}"
+                        params = f"type=ws&security=none&encryption=none&path={path}"
                         if host:
                             params += f"&host={host}"
                     else:
-                        params = "type=tcp&security=none"
+                        params = "type=tcp&security=none&encryption=none"
                     return f"vless://{uuid_val}@{ip}:{port}?{params}#{remark_val}"
             except Exception as e:
                 logging.error(f"Failed to build link: {e}")

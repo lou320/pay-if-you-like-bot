@@ -750,9 +750,9 @@ class XUIClient:
 
                 if pbk and sni and sid:
                     return (f"vless://{client_uuid}@{ip}:{port}"
-                            f"?type=tcp&security=reality&pbk={pbk}&fp=chrome"
+                            f"?type=tcp&security=reality&encryption=none&pbk={pbk}&fp=chrome"
                             f"&sni={sni}&sid={sid}&spx=%2F&flow=xtls-rprx-vision#{remark}")
-                return f"vless://{client_uuid}@{ip}:{port}?type=tcp&security=none#{remark}"
+                return f"vless://{client_uuid}@{ip}:{port}?type=tcp&security=none&encryption=none#{remark}"
 
             # If client already exists, return its link instead of failing hard.
             try:
