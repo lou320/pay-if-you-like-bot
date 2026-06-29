@@ -466,6 +466,25 @@ class XUIClient:
             ])
         return urls
 
+    def _inbound_update_urls(self, inbound_id):
+        urls = []
+        for root in self.base_roots:
+            urls.extend([
+                f"{root}/panel/api/inbounds/update/{inbound_id}",
+                f"{root}/panel/api/inbound/update/{inbound_id}",
+                f"{root}/xui/API/inbounds/update/{inbound_id}",
+                f"{root}/xui/API/inbound/update/{inbound_id}",
+                f"{root}/xui/api/inbounds/update/{inbound_id}",
+                f"{root}/xui/api/inbound/update/{inbound_id}",
+                f"{root}/api/inbounds/update/{inbound_id}",
+                f"{root}/api/inbound/update/{inbound_id}",
+                f"{root}/panel/inbounds/{inbound_id}",
+                f"{root}/panel/inbound/{inbound_id}",
+                f"{root}/xui/inbounds/{inbound_id}",
+                f"{root}/xui/inbound/{inbound_id}",
+            ])
+        return urls
+
     def _fetch_inbound(self, inbound_id):
         tried = []
         for url in self._inbound_get_urls(inbound_id):
@@ -676,6 +695,44 @@ class XUIClient:
                     "settings": json.dumps({"clients": [client_obj]})
                 }
 
+            def build_link_for_uuid(client_uuid):
+                remark = email
+                ip = self.base_url.split('://')[1].split(':')[0]
+                port = inbound.get('port')
+
+                reality = stream_settings.get('realitySettings') if isinstance(stream_settings, dict) else None
+                pbk = sni = sid = None
+                if isinstance(reality, dict):
+                    settings_obj = reality.get('settings')
+                    if isinstance(settings_obj, str):
+                        try:
+                            settings_obj = json.loads(settings_obj)
+                        except Exception:
+                            settings_obj = None
+                    if isinstance(settings_obj, dict):
+                        pbk = settings_obj.get('publicKey')
+                    names = reality.get('serverNames') or []
+                    shorts = reality.get('shortIds') or []
+                    sni = names[0] if names else None
+                    sid = shorts[0] if shorts else None
+
+                if pbk and sni and sid:
+                    return (f"vless://{client_uuid}@{ip}:{port}"
+                            f"?type=tcp&security=reality&pbk={pbk}&fp=chrome"
+                            f"&sni={sni}&sid={sid}&spx=%2F&flow=xtls-rprx-vision#{remark}")
+                return f"vless://{client_uuid}@{ip}:{port}?type=tcp&security=none#{remark}"
+
+            # If client already exists, return its link instead of failing hard.
+            try:
+                existing_settings = json.loads(inbound.get('settings', '{}'))
+            except Exception:
+                existing_settings = {}
+            for c in (existing_settings.get('clients') or []):
+                if str(c.get('email', '')) == str(email):
+                    existing_uuid = c.get('id')
+                    if existing_uuid:
+                        return build_link_for_uuid(existing_uuid)
+
             # Try with flow first, then retry without flow for newer variants.
             responses = []
             add_success = False
@@ -688,45 +745,80 @@ class XUIClient:
                     if isinstance(resp, dict) and resp.get('success'):
                         add_success = True
                         break
+
+                    # Some panels accept addClient as form body only.
+                    resp = self._try_post_form(add_url, payload)
+                    if resp:
+                        responses.append(resp)
+                    if isinstance(resp, dict) and resp.get('success'):
+                        add_success = True
+                        break
                 if add_success:
                     break
 
             if not add_success:
-                msg = ""
-                for resp in responses:
-                    if isinstance(resp, dict) and resp.get('msg'):
-                        msg = str(resp.get('msg'))
-                        break
-                self.last_error = msg or "Add client API rejected request."
-                return None
+                # Fallback: append client to inbound settings and call update endpoint.
+                clients = list(existing_settings.get('clients') or [])
 
-            remark = email
-            ip = self.base_url.split('://')[1].split(':')[0]
-            port = inbound.get('port')
+                def try_update(include_flow=True):
+                    client_obj = {
+                        "id": new_uuid,
+                        "email": email,
+                        "totalGB": limit_gb * 1024 * 1024 * 1024,
+                        "expiryTime": expiry_time,
+                        "enable": True,
+                        "tgId": "",
+                        "subId": sub_id,
+                        "limitIp": 1
+                    }
+                    if include_flow:
+                        client_obj["flow"] = "xtls-rprx-vision"
 
-            reality = stream_settings.get('realitySettings') if isinstance(stream_settings, dict) else None
-            pbk = sni = sid = None
-            if isinstance(reality, dict):
-                settings_obj = reality.get('settings')
-                if isinstance(settings_obj, str):
-                    try:
-                        settings_obj = json.loads(settings_obj)
-                    except Exception:
-                        settings_obj = None
-                if isinstance(settings_obj, dict):
-                    pbk = settings_obj.get('publicKey')
-                names = reality.get('serverNames') or []
-                shorts = reality.get('shortIds') or []
-                sni = names[0] if names else None
-                sid = shorts[0] if shorts else None
+                    new_clients = clients + [client_obj]
+                    settings_str = json.dumps({"clients": new_clients})
+                    payload_min = {
+                        "id": self.inbound_id,
+                        "settings": settings_str,
+                    }
+                    payload_full = {
+                        "id": self.inbound_id,
+                        "up": inbound.get('up', 0),
+                        "down": inbound.get('down', 0),
+                        "total": inbound.get('total', 0),
+                        "remark": inbound.get('remark', ''),
+                        "enable": inbound.get('enable', True),
+                        "expiryTime": inbound.get('expiryTime', 0),
+                        "listen": inbound.get('listen', ''),
+                        "port": inbound.get('port', 0),
+                        "protocol": inbound.get('protocol', 'vless'),
+                        "settings": settings_str,
+                        "streamSettings": inbound.get('streamSettings', '{}'),
+                        "sniffing": inbound.get('sniffing', '{}'),
+                        "allocate": inbound.get('allocate', '{"strategy":"always","refresh":5,"concurrency":3}'),
+                        "tag": inbound.get('tag', f'in-{inbound.get("port", 0)}-tcp'),
+                    }
 
-            if pbk and sni and sid:
-                link = (f"vless://{new_uuid}@{ip}:{port}"
-                        f"?type=tcp&security=reality&pbk={pbk}&fp=chrome"
-                        f"&sni={sni}&sid={sid}&spx=%2F&flow=xtls-rprx-vision#{remark}")
-            else:
-                link = f"vless://{new_uuid}@{ip}:{port}?type=tcp&security=none#{remark}"
-            return link
+                    for update_url in self._inbound_update_urls(self.inbound_id):
+                        for payload in (payload_min, payload_full):
+                            resp = self._try_post_json(update_url, payload)
+                            if isinstance(resp, dict) and resp.get('success'):
+                                return True
+                            resp = self._try_post_form(update_url, payload)
+                            if isinstance(resp, dict) and resp.get('success'):
+                                return True
+                    return False
+
+                updated = try_update(include_flow=True) or try_update(include_flow=False)
+                if not updated:
+                    msg = ""
+                    for resp in responses:
+                        if isinstance(resp, dict) and resp.get('msg'):
+                            msg = str(resp.get('msg'))
+                            break
+                    self.last_error = msg or self.last_error or "Add client API rejected request."
+                    return None
+
+            return build_link_for_uuid(new_uuid)
         except Exception as e:
             logging.error(f"XUI Client Error: {e}")
             self.last_error = str(e)
