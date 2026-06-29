@@ -306,8 +306,27 @@ class XUIClient:
         self.username = server_config['username']
         self.password = server_config['password']
         self.inbound_id = server_config['inbound_id']
+        self.api_token = str(server_config.get('api_token', '') or '').strip()
         self.session = requests.Session()
         self.last_error = ""
+
+        # Some 3x-ui builds expose API on host root (without web base path).
+        self.base_roots = [self.base_url]
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(self.base_url)
+            root = f"{p.scheme}://{p.netloc}"
+            if root not in self.base_roots:
+                self.base_roots.append(root)
+        except Exception:
+            pass
+
+        if self.api_token:
+            self.session.headers.update({
+                'Authorization': f'Bearer {self.api_token}',
+                'X-API-Key': self.api_token,
+                'x-ui-token': self.api_token,
+            })
         self.login()
 
     def login(self):
@@ -327,8 +346,16 @@ class XUIClient:
     def _try_get_json(self, url):
         try:
             r = self.session.get(url, verify=False, timeout=15)
-            return r.json()
-        except Exception:
+            try:
+                body = r.json()
+                if isinstance(body, dict) and not body.get('success') and body.get('msg'):
+                    self.last_error = str(body.get('msg'))
+                return body
+            except Exception:
+                self.last_error = f"HTTP {r.status_code}: {r.text[:200]}"
+                return None
+        except Exception as e:
+            self.last_error = f"GET error: {e}"
             return None
 
     def _try_post_json(self, url, payload):
@@ -362,53 +389,94 @@ class XUIClient:
             return None
 
     def _inbound_get_urls(self, inbound_id):
-        return [
-            f"{self.base_url}/panel/api/inbounds/get/{inbound_id}",
-            f"{self.base_url}/xui/API/inbounds/get/{inbound_id}",
-            f"{self.base_url}/xui/api/inbounds/get/{inbound_id}",
-            f"{self.base_url}/api/inbounds/get/{inbound_id}",
-            f"{self.base_url}/panel/inbound/get/{inbound_id}",
-            f"{self.base_url}/xui/inbound/get/{inbound_id}",
-        ]
+        urls = []
+        for root in self.base_roots:
+            urls.extend([
+                f"{root}/panel/api/inbounds/get/{inbound_id}",
+                f"{root}/panel/api/inbound/get/{inbound_id}",
+                f"{root}/xui/API/inbounds/get/{inbound_id}",
+                f"{root}/xui/API/inbound/get/{inbound_id}",
+                f"{root}/xui/api/inbounds/get/{inbound_id}",
+                f"{root}/xui/api/inbound/get/{inbound_id}",
+                f"{root}/api/inbounds/get/{inbound_id}",
+                f"{root}/api/inbound/get/{inbound_id}",
+                f"{root}/panel/inbound/get/{inbound_id}",
+                f"{root}/panel/inbounds/get/{inbound_id}",
+                f"{root}/xui/inbound/get/{inbound_id}",
+                f"{root}/xui/inbounds/get/{inbound_id}",
+            ])
+        return urls
 
     def _inbound_list_urls(self):
-        return [
-            f"{self.base_url}/panel/api/inbounds/list",
-            f"{self.base_url}/xui/API/inbounds/list",
-            f"{self.base_url}/xui/api/inbounds/list",
-            f"{self.base_url}/api/inbounds/list",
-            f"{self.base_url}/panel/inbound/list",
-            f"{self.base_url}/xui/inbound/list",
-        ]
+        urls = []
+        for root in self.base_roots:
+            urls.extend([
+                f"{root}/panel/api/inbounds/list",
+                f"{root}/panel/api/inbound/list",
+                f"{root}/xui/API/inbounds/list",
+                f"{root}/xui/API/inbound/list",
+                f"{root}/xui/api/inbounds/list",
+                f"{root}/xui/api/inbound/list",
+                f"{root}/api/inbounds/list",
+                f"{root}/api/inbound/list",
+                f"{root}/panel/inbound/list",
+                f"{root}/panel/inbounds/list",
+                f"{root}/xui/inbound/list",
+                f"{root}/xui/inbounds/list",
+            ])
+        return urls
 
     def _inbound_add_urls(self):
-        return [
-            f"{self.base_url}/panel/api/inbounds/addClient",
-            f"{self.base_url}/xui/API/inbounds/addClient",
-            f"{self.base_url}/xui/api/inbounds/addClient",
-            f"{self.base_url}/api/inbounds/addClient",
-            f"{self.base_url}/panel/inbound/addClient",
-            f"{self.base_url}/xui/inbound/addClient",
-        ]
+        urls = []
+        for root in self.base_roots:
+            urls.extend([
+                f"{root}/panel/api/inbounds/addClient",
+                f"{root}/panel/api/inbound/addClient",
+                f"{root}/xui/API/inbounds/addClient",
+                f"{root}/xui/API/inbound/addClient",
+                f"{root}/xui/api/inbounds/addClient",
+                f"{root}/xui/api/inbound/addClient",
+                f"{root}/api/inbounds/addClient",
+                f"{root}/api/inbound/addClient",
+                f"{root}/panel/inbound/addClient",
+                f"{root}/panel/inbounds/addClient",
+                f"{root}/xui/inbound/addClient",
+                f"{root}/xui/inbounds/addClient",
+            ])
+        return urls
 
     def _inbound_create_urls(self):
-        return [
-            f"{self.base_url}/panel/api/inbounds/add",
-            f"{self.base_url}/xui/API/inbounds/add",
-            f"{self.base_url}/xui/api/inbounds/add",
-            f"{self.base_url}/api/inbounds/add",
-            f"{self.base_url}/panel/inbound/add",
-            f"{self.base_url}/inbound/add",
-            f"{self.base_url}/xui/inbound/add",
-            f"{self.base_url}/xui/inbounds/add",
-            f"{self.base_url}/panel/inbounds/add",
-        ]
+        urls = []
+        for root in self.base_roots:
+            urls.extend([
+                f"{root}/panel/api/inbounds/add",
+                f"{root}/panel/api/inbound/add",
+                f"{root}/xui/API/inbounds/add",
+                f"{root}/xui/API/inbound/add",
+                f"{root}/xui/api/inbounds/add",
+                f"{root}/xui/api/inbound/add",
+                f"{root}/api/inbounds/add",
+                f"{root}/api/inbound/add",
+                f"{root}/panel/inbound/add",
+                f"{root}/panel/inbounds/add",
+                f"{root}/inbound/add",
+                f"{root}/inbounds/add",
+                f"{root}/xui/inbound/add",
+                f"{root}/xui/inbounds/add",
+            ])
+        return urls
 
     def _fetch_inbound(self, inbound_id):
+        tried = []
         for url in self._inbound_get_urls(inbound_id):
+            tried.append(url)
             data = self._try_get_json(url)
             if isinstance(data, dict) and data.get('success') and data.get('obj'):
                 return data.get('obj')
+        self.last_error = (
+            self.last_error or
+            f"Inbound fetch failed. Tried: {'; '.join(tried[:4])}"
+        )
         return None
 
     def discover_preferred_inbound_id(self):
@@ -1247,6 +1315,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw = update.message.text
         # Try parsing raw X-UI install script output
         try:
+            api_token = ""
             if "Access URL:" in raw:
                 import re
                 try:
@@ -1262,11 +1331,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else:
                         raise ValueError("URL not found")
                     iid = 1
+                    token_match = re.search(r'API Token:\s*(\S+)', raw)
+                    if token_match:
+                        api_token = token_match.group(1)
                 except AttributeError:
                     raise ValueError("Regex parsing failed. Check input format.")
             else:
-                # Fallback to pipe format: URL|User|Pass|ID
-                url, user, pwd, iid = raw.split('|')
+                # Fallback to pipe format: URL|User|Pass|ID|ApiToken(optional)
+                parts = [p.strip() for p in raw.split('|')]
+                if len(parts) < 4:
+                    raise ValueError("Use format URL|User|Pass|ID|ApiToken(optional)")
+                url, user, pwd, iid = parts[:4]
+                if len(parts) >= 5:
+                    api_token = parts[4]
 
             # Ensure valid URL structure
             if not url.startswith("http"):
@@ -1278,6 +1355,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "username": user.strip(),
                 "password": pwd.strip(),
                 "inbound_id": int(str(iid).strip()),
+                "api_token": api_token.strip(),
                 "flow_limit_gb": 100,
                 "expire_days": 30,
                 "vpn_status_scope": False,
