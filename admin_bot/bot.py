@@ -346,11 +346,27 @@ class XUIClient:
             self.last_error = f"POST error: {e}"
             return None
 
+    def _try_post_form(self, url, payload):
+        try:
+            r = self.session.post(url, data=payload, verify=False, timeout=15)
+            try:
+                body = r.json()
+                if isinstance(body, dict) and not body.get('success') and body.get('msg'):
+                    self.last_error = str(body.get('msg'))
+                return body
+            except Exception:
+                self.last_error = f"HTTP {r.status_code}: {r.text[:200]}"
+                return None
+        except Exception as e:
+            self.last_error = f"POST(form) error: {e}"
+            return None
+
     def _inbound_get_urls(self, inbound_id):
         return [
             f"{self.base_url}/panel/api/inbounds/get/{inbound_id}",
             f"{self.base_url}/xui/API/inbounds/get/{inbound_id}",
             f"{self.base_url}/xui/api/inbounds/get/{inbound_id}",
+            f"{self.base_url}/api/inbounds/get/{inbound_id}",
         ]
 
     def _inbound_list_urls(self):
@@ -358,6 +374,7 @@ class XUIClient:
             f"{self.base_url}/panel/api/inbounds/list",
             f"{self.base_url}/xui/API/inbounds/list",
             f"{self.base_url}/xui/api/inbounds/list",
+            f"{self.base_url}/api/inbounds/list",
         ]
 
     def _inbound_add_urls(self):
@@ -365,6 +382,7 @@ class XUIClient:
             f"{self.base_url}/panel/api/inbounds/addClient",
             f"{self.base_url}/xui/API/inbounds/addClient",
             f"{self.base_url}/xui/api/inbounds/addClient",
+            f"{self.base_url}/api/inbounds/addClient",
         ]
 
     def _inbound_create_urls(self):
@@ -372,6 +390,9 @@ class XUIClient:
             f"{self.base_url}/panel/api/inbounds/add",
             f"{self.base_url}/xui/API/inbounds/add",
             f"{self.base_url}/xui/api/inbounds/add",
+            f"{self.base_url}/api/inbounds/add",
+            f"{self.base_url}/panel/inbound/add",
+            f"{self.base_url}/inbound/add",
         ]
 
     def _fetch_inbound(self, inbound_id):
@@ -458,9 +479,21 @@ class XUIClient:
         }
 
         responses = []
+        tried = []
         for payload in (payload_legacy, payload_object):
             for url in self._inbound_create_urls():
                 resp = self._try_post_json(url, payload)
+                tried.append(url + " [json]")
+                if resp:
+                    responses.append(resp)
+                if isinstance(resp, dict) and resp.get("success"):
+                    detected_id = self.discover_preferred_inbound_id()
+                    self.inbound_id = int(detected_id)
+                    return True, int(detected_id), "Inbound created"
+
+                # Some 3x-ui routes accept form-encoded body instead of JSON.
+                resp = self._try_post_form(url, payload)
+                tried.append(url + " [form]")
                 if resp:
                     responses.append(resp)
                 if isinstance(resp, dict) and resp.get("success"):
@@ -473,7 +506,17 @@ class XUIClient:
             if isinstance(resp, dict) and resp.get("msg"):
                 err_msg = str(resp.get("msg"))
                 break
-        self.last_error = err_msg or self.last_error or "Failed to create inbound (API rejected request)."
+        if not err_msg and self.last_error:
+            err_msg = self.last_error
+        if not err_msg:
+            err_msg = "Failed to create inbound (API rejected request)."
+
+        # Keep it short enough for Telegram while still showing endpoint coverage.
+        tried_preview = "; ".join(tried[:4])
+        if tried_preview:
+            err_msg = f"{err_msg} Tried: {tried_preview}"
+
+        self.last_error = err_msg
         return False, None, self.last_error
 
     def add_client(self, email, limit_gb=0, expire_days=0):
