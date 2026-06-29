@@ -334,8 +334,16 @@ class XUIClient:
     def _try_post_json(self, url, payload):
         try:
             r = self.session.post(url, json=payload, verify=False, timeout=15)
-            return r.json()
-        except Exception:
+            try:
+                body = r.json()
+                if isinstance(body, dict) and not body.get('success') and body.get('msg'):
+                    self.last_error = str(body.get('msg'))
+                return body
+            except Exception:
+                self.last_error = f"HTTP {r.status_code}: {r.text[:200]}"
+                return None
+        except Exception as e:
+            self.last_error = f"POST error: {e}"
             return None
 
     def _inbound_get_urls(self, inbound_id):
@@ -423,27 +431,49 @@ class XUIClient:
         return self.inbound_id
 
     def create_auto_inbound(self, remark: str = "Auto-Inbound", port: int = 443):
-        payload = copy.deepcopy(AUTO_INBOUND_TEMPLATE)
-        payload["remark"] = remark
-        payload["port"] = int(port)
-        payload["tag"] = f"in-{int(port)}-tcp"
+        base = copy.deepcopy(AUTO_INBOUND_TEMPLATE)
+        base["remark"] = remark
+        base["port"] = int(port)
+        base["tag"] = f"in-{int(port)}-tcp"
+
+        # x-ui variants accept different shapes:
+        # 1) nested object fields (newer)
+        # 2) settings/streamSettings/sniffing as JSON strings + extra top-level fields (legacy)
+        payload_object = copy.deepcopy(base)
+        payload_legacy = {
+            "up": 0,
+            "down": 0,
+            "total": 0,
+            "remark": base.get("remark"),
+            "enable": True,
+            "expiryTime": 0,
+            "listen": base.get("listen", ""),
+            "port": base.get("port"),
+            "protocol": base.get("protocol"),
+            "settings": json.dumps(base.get("settings", {})),
+            "streamSettings": json.dumps(base.get("streamSettings", {})),
+            "sniffing": json.dumps(base.get("sniffing", {})),
+            "allocate": json.dumps({"strategy": "always", "refresh": 5, "concurrency": 3}),
+            "tag": base.get("tag"),
+        }
 
         responses = []
-        for url in self._inbound_create_urls():
-            resp = self._try_post_json(url, payload)
-            if resp:
-                responses.append(resp)
-            if isinstance(resp, dict) and resp.get("success"):
-                detected_id = self.discover_preferred_inbound_id()
-                self.inbound_id = int(detected_id)
-                return True, int(detected_id), "Inbound created"
+        for payload in (payload_legacy, payload_object):
+            for url in self._inbound_create_urls():
+                resp = self._try_post_json(url, payload)
+                if resp:
+                    responses.append(resp)
+                if isinstance(resp, dict) and resp.get("success"):
+                    detected_id = self.discover_preferred_inbound_id()
+                    self.inbound_id = int(detected_id)
+                    return True, int(detected_id), "Inbound created"
 
         err_msg = ""
         for resp in responses:
             if isinstance(resp, dict) and resp.get("msg"):
                 err_msg = str(resp.get("msg"))
                 break
-        self.last_error = err_msg or "Failed to create inbound (API rejected request)."
+        self.last_error = err_msg or self.last_error or "Failed to create inbound (API rejected request)."
         return False, None, self.last_error
 
     def add_client(self, email, limit_gb=0, expire_days=0):
