@@ -1,8 +1,18 @@
 {
   "8130396030:FreeTrial_8130396030_6470": {
-    "last_low_data_notice": 1778469092
+    "last_low_data_notice": 1782267355
   },
   "8130396030:FreeTrial_8130396030": {
-    "last_low_data_notice": 1778469092
+    "last_low_data_notice": 1782267355,
+    "last_expiry_notice": 1782270706
+  },
+  "8130396030:Premium_8130396030_bf7d": {
+    "last_expiry_notice": 1782267355
+  },
+  "8130396030:Premium_8130396030_d3aa": {
+    "last_expiry_notice": 1782267355
+  },
+  "8130396030:Premium_8130396030_389d": {
+    "last_low_data_notice": 1782267355
   }
 }

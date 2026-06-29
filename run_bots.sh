@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Dual Bot Manager Script
-# Manages both admin_bot and vpn_bot instances
+# Multi Bot Manager Script
+# Manages admin_bot, vpn_bot, enterprise_bot, and dashboard
 # Usage: ./run_bots.sh [start|stop|restart|status]
 
 set -e
@@ -9,14 +9,17 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ADMIN_BOT_DIR="$REPO_ROOT/admin_bot"
 VPN_BOT_DIR="$REPO_ROOT/vpn_bot"
+ENTERPRISE_BOT_DIR="$REPO_ROOT/enterprise_bot"
 DASHBOARD_DIR="$REPO_ROOT/dashboard"
 VENV_BIN="$REPO_ROOT/venv/bin/python3"
 
 ADMIN_BOT_LOG="$REPO_ROOT/admin_bot.log"
 VPN_BOT_LOG="$REPO_ROOT/vpn_bot.log"
+ENTERPRISE_BOT_LOG="$REPO_ROOT/enterprise_bot.log"
 DASHBOARD_LOG="$REPO_ROOT/dashboard.log"
 ADMIN_BOT_PID_FILE="$REPO_ROOT/.admin_bot.pid"
 VPN_BOT_PID_FILE="$REPO_ROOT/.vpn_bot.pid"
+ENTERPRISE_BOT_PID_FILE="$REPO_ROOT/.enterprise_bot.pid"
 DASHBOARD_PID_FILE="$REPO_ROOT/.dashboard.pid"
 
 # Dashboard credentials — override via environment variables
@@ -43,11 +46,12 @@ print_info() {
 }
 
 start_bots() {
-    print_info "Starting both bots..."
+    print_info "Starting all bots..."
     
     # Kill any existing processes
     pkill -f "admin_bot/bot.py" || true
     pkill -f "vpn_bot/bot.py" || true
+    pkill -f "enterprise_bot/bot.py" || true
     sleep 1
     
     # Start Admin Bot
@@ -89,6 +93,26 @@ start_bots() {
 
     sleep 1
 
+    # Start Enterprise Bot
+    print_info "Starting Enterprise Bot..."
+    cd "$ENTERPRISE_BOT_DIR"
+    nohup $VENV_BIN -u bot.py > "$ENTERPRISE_BOT_LOG" 2>&1 &
+    ENTERPRISE_PID=$!
+    echo $ENTERPRISE_PID > "$ENTERPRISE_BOT_PID_FILE"
+    print_status "Enterprise Bot started (PID: $ENTERPRISE_PID)"
+    print_info "Log: $ENTERPRISE_BOT_LOG"
+
+    sleep 2
+
+    if ps -p $ENTERPRISE_PID > /dev/null; then
+        print_status "Enterprise Bot is running"
+    else
+        print_error "Enterprise Bot failed to start"
+        return 1
+    fi
+
+    sleep 1
+
     # Start Dashboard
     print_info "Starting Dashboard..."
     cd "$DASHBOARD_DIR"
@@ -112,7 +136,7 @@ start_bots() {
 }
 
 stop_bots() {
-    print_info "Stopping both bots..."
+    print_info "Stopping all bots..."
     
     if [ -f "$ADMIN_BOT_PID_FILE" ]; then
         ADMIN_PID=$(cat "$ADMIN_BOT_PID_FILE")
@@ -132,6 +156,15 @@ stop_bots() {
         rm -f "$VPN_BOT_PID_FILE"
     fi
 
+    if [ -f "$ENTERPRISE_BOT_PID_FILE" ]; then
+        ENTERPRISE_PID=$(cat "$ENTERPRISE_BOT_PID_FILE")
+        if ps -p $ENTERPRISE_PID > /dev/null 2>&1; then
+            kill $ENTERPRISE_PID 2>/dev/null || true
+            print_status "Enterprise Bot stopped"
+        fi
+        rm -f "$ENTERPRISE_BOT_PID_FILE"
+    fi
+
     if [ -f "$DASHBOARD_PID_FILE" ]; then
         DASH_PID=$(cat "$DASHBOARD_PID_FILE")
         if ps -p $DASH_PID > /dev/null 2>&1; then
@@ -144,6 +177,7 @@ stop_bots() {
     # Fallback: kill all matching processes
     pkill -f "admin_bot/bot.py" || true
     pkill -f "vpn_bot/bot.py"   || true
+    pkill -f "enterprise_bot/bot.py" || true
     pkill -f "dashboard/app.py" || true
 
     print_status "All services stopped"
@@ -154,6 +188,7 @@ status_bots() {
     
     ADMIN_RUNNING=0
     VPN_RUNNING=0
+    ENTERPRISE_RUNNING=0
     
     if [ -f "$ADMIN_BOT_PID_FILE" ]; then
         ADMIN_PID=$(cat "$ADMIN_BOT_PID_FILE")
@@ -178,6 +213,18 @@ status_bots() {
     else
         print_error "VPN Bot is NOT running (no PID file)"
     fi
+
+    if [ -f "$ENTERPRISE_BOT_PID_FILE" ]; then
+        ENTERPRISE_PID=$(cat "$ENTERPRISE_BOT_PID_FILE")
+        if ps -p $ENTERPRISE_PID > /dev/null 2>&1; then
+            print_status "Enterprise Bot is running (PID: $ENTERPRISE_PID)"
+            ENTERPRISE_RUNNING=1
+        else
+            print_error "Enterprise Bot is NOT running (stale PID: $ENTERPRISE_PID)"
+        fi
+    else
+        print_error "Enterprise Bot is NOT running (no PID file)"
+    fi
     
     DASH_RUNNING=0
     if [ -f "$DASHBOARD_PID_FILE" ]; then
@@ -193,7 +240,7 @@ status_bots() {
     fi
 
     echo ""
-    if [ $ADMIN_RUNNING -eq 1 ] && [ $VPN_RUNNING -eq 1 ] && [ $DASH_RUNNING -eq 1 ]; then
+    if [ $ADMIN_RUNNING -eq 1 ] && [ $VPN_RUNNING -eq 1 ] && [ $ENTERPRISE_RUNNING -eq 1 ] && [ $DASH_RUNNING -eq 1 ]; then
         print_status "All services are running ✓"
         return 0
     else
@@ -203,10 +250,11 @@ status_bots() {
 }
 
 tail_logs() {
-    print_info "Tailing logs (Admin | VPN)..."
+    print_info "Tailing logs (Admin | VPN | Enterprise)..."
     echo ""
     paste -d '|' <(tail -f "$ADMIN_BOT_LOG" | sed 's/^/[ADMIN] /') \
-                  <(tail -f "$VPN_BOT_LOG" | sed 's/^/[VPN]   /')
+                  <(tail -f "$VPN_BOT_LOG" | sed 's/^/[VPN]   /') \
+                  <(tail -f "$ENTERPRISE_BOT_LOG" | sed 's/^/[ENT]   /')
 }
 
 show_help() {
@@ -218,11 +266,11 @@ show_help() {
 Usage: ./run_bots.sh [COMMAND]
 
 Commands:
-  start       Start both bots (kills any existing instances)
-  stop        Stop both bots
-  restart     Restart both bots (equivalent to: stop, then start)
-  status      Check status of both bots
-  logs        Tail both bot logs in real-time
+    start       Start all bots (kills any existing instances)
+    stop        Stop all bots
+    restart     Restart all bots (equivalent to: stop, then start)
+    status      Check status of all bots
+    logs        Tail all bot logs in real-time
   help        Show this help message
 
 Examples:
@@ -234,6 +282,7 @@ Examples:
 Log Files:
   Admin Bot: $ADMIN_BOT_LOG
   VPN Bot:   $VPN_BOT_LOG
+    Enterprise: $ENTERPRISE_BOT_LOG
 
 Quick Debug:
   tail -f $ADMIN_BOT_LOG   # Watch Admin Bot logs

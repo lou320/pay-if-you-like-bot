@@ -716,24 +716,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not url.startswith("http"):
                 url = "https://" + url
 
-                new_server = {
-                    "name": f"Server {len(SERVERS)+1}",
-                    "panel_url": url.strip(),
-                    "username": user.strip(),
-                    "password": pwd.strip(),
-                    "inbound_id": int(str(iid).strip()),
-                    "flow_limit_gb": 100,
-                    "expire_days": 30
-                }
-                # Reload the config just before writing to ensure we don't persist any
-                # accidental in‑memory changes (e.g. bot_token hacks from startup).
-                CONFIG = load_config()
-                SERVERS = CONFIG.get('servers', [])
-                SERVERS.append(new_server)
-                CONFIG['servers'] = SERVERS
-                # Write back to parent config.json (root)
-                with open('../config.json', 'w') as f:
-                    json.dump(CONFIG, f, indent=4)
+            new_server = {
+                "name": f"Server {len(SERVERS)+1}",
+                "panel_url": url.strip(),
+                "username": user.strip(),
+                "password": pwd.strip(),
+                "inbound_id": int(str(iid).strip()),
+                "flow_limit_gb": 100,
+                "expire_days": 30
+            }
+            # Reload the config just before writing to ensure we don't persist any
+            # accidental in-memory changes.
+            CONFIG = load_config()
+            SERVERS = CONFIG.get('servers', [])
+            SERVERS.append(new_server)
+            CONFIG['servers'] = SERVERS
+            # Write back to parent config.json (root)
+            with open('../config.json', 'w') as f:
+                json.dump(CONFIG, f, indent=4)
             await update.message.reply_text("✅ Server Added Successfully!")
             context.user_data['gen_type'] = None
             return
