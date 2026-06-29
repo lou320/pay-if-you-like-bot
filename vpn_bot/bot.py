@@ -5,6 +5,7 @@ import secrets
 import string
 import requests
 import asyncio
+from urllib.parse import urlparse
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 import telegram
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
@@ -336,8 +337,71 @@ class XUIClient:
         self.username = server_config['username']
         self.password = server_config['password']
         self.inbound_id = server_config['inbound_id']
+        self.api_token = str(server_config.get('api_token', '') or '').strip()
         self.session = requests.Session()
+
+        self.base_roots = [self.base_url]
+        try:
+            p = urlparse(self.base_url)
+            root = f"{p.scheme}://{p.netloc}"
+            if root not in self.base_roots:
+                self.base_roots.append(root)
+        except Exception:
+            pass
+
+        if self.api_token:
+            self.session.headers.update({
+                'Authorization': f'Bearer {self.api_token}',
+                'X-API-Key': self.api_token,
+                'x-ui-token': self.api_token,
+            })
+
         self.login()
+
+    def _api_get_json(self, url):
+        try:
+            r = self.session.get(url, verify=False, timeout=15)
+            return r.json()
+        except Exception:
+            return None
+
+    def _inbound_list_urls(self):
+        urls = []
+        for root in self.base_roots:
+            urls.extend([
+                f"{root}/panel/api/inbounds/list",
+                f"{root}/panel/api/inbound/list",
+                f"{root}/xui/API/inbounds/list",
+                f"{root}/xui/API/inbound/list",
+                f"{root}/xui/api/inbounds/list",
+                f"{root}/xui/api/inbound/list",
+                f"{root}/api/inbounds/list",
+                f"{root}/api/inbound/list",
+                f"{root}/panel/inbound/list",
+                f"{root}/panel/inbounds/list",
+                f"{root}/xui/inbound/list",
+                f"{root}/xui/inbounds/list",
+            ])
+        return urls
+
+    def _fetch_inbounds_list(self):
+        # Try as-is, then re-login once and retry all routes.
+        for url in self._inbound_list_urls():
+            data = self._api_get_json(url)
+            if isinstance(data, dict) and data.get('success'):
+                obj = data.get('obj')
+                if isinstance(obj, list):
+                    return obj
+
+        self.login()
+        for url in self._inbound_list_urls():
+            data = self._api_get_json(url)
+            if isinstance(data, dict) and data.get('success'):
+                obj = data.get('obj')
+                if isinstance(obj, list):
+                    return obj
+
+        return []
 
     def login(self):
         login_url = f"{self.base_url}/login"
@@ -353,54 +417,48 @@ class XUIClient:
 
     def get_client_stats(self, target_uuid):
         """Find a client by UUID and return stats (up, down, total, expiry)."""
-        # If no login cookies, login first
-        if not self.session.cookies:
-            self.login()
-
-        list_url = f"{self.base_url}/panel/api/inbounds/list"
         try:
-            r = self.session.get(list_url, verify=False, timeout=10)
-            # If session expired (success: false or auth error), re-login and retry
-            if not r.json().get('success'):
-                logging.info(f"Session expired for {self.base_url}, re-logging in...")
-                self.login()
-                r = self.session.get(list_url, verify=False, timeout=10)
-            
-            if r.json().get('success'):
-                inbounds = r.json()['obj']
-                for inbound in inbounds:
-                    settings = json.loads(inbound['settings'])
-                    
-                    # 1. Find Client in Settings (Config)
-                    target_client = None
-                    for client in settings['clients']:
-                        if client['id'] == target_uuid:
-                            target_client = client
-                            break
-                    
-                    if target_client:
-                        # 2. Try to find REAL usage stats from 'clientStats' (dynamic)
-                        # X-UI often separates stats from config
-                        up = target_client.get('up', 0)
-                        down = target_client.get('down', 0)
-                        
-                        client_stats = inbound.get('clientStats')
-                        if client_stats:
-                            for stat in client_stats:
-                                # Match by Email (most reliable) or ID
-                                if stat.get('email') == target_client['email']:
-                                    up = stat.get('up', 0)
-                                    down = stat.get('down', 0)
-                                    break
-                        
-                        return {
-                            "email": target_client['email'],
-                            "up": up,
-                            "down": down,
-                            "total": target_client.get('totalGB', 0),
-                            "expiry": target_client.get('expiryTime', 0),
-                            "enable": target_client.get('enable', True)
-                        }
+            inbounds = self._fetch_inbounds_list()
+            for inbound in inbounds:
+                raw_settings = inbound.get('settings', '{}')
+                if isinstance(raw_settings, str):
+                    try:
+                        settings = json.loads(raw_settings)
+                    except Exception:
+                        settings = {'clients': []}
+                elif isinstance(raw_settings, dict):
+                    settings = raw_settings
+                else:
+                    settings = {'clients': []}
+
+                # 1. Find Client in Settings (Config)
+                target_client = None
+                for client in settings.get('clients', []):
+                    if str(client.get('id')) == str(target_uuid):
+                        target_client = client
+                        break
+
+                if target_client:
+                    # 2. Try to find REAL usage stats from 'clientStats' (dynamic)
+                    up = target_client.get('up', 0)
+                    down = target_client.get('down', 0)
+
+                    client_stats = inbound.get('clientStats')
+                    if client_stats:
+                        for stat in client_stats:
+                            if stat.get('email') == target_client.get('email'):
+                                up = stat.get('up', 0)
+                                down = stat.get('down', 0)
+                                break
+
+                    return {
+                        "email": target_client.get('email', ''),
+                        "up": up,
+                        "down": down,
+                        "total": target_client.get('totalGB', 0),
+                        "expiry": target_client.get('expiryTime', 0),
+                        "enable": target_client.get('enable', True)
+                    }
             return None
         except Exception as e:
             logging.error(f"Error checking stats: {e}")
