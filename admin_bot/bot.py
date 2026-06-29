@@ -252,6 +252,7 @@ class XUIClient:
         self.password = server_config['password']
         self.inbound_id = server_config['inbound_id']
         self.session = requests.Session()
+        self.last_error = ""
         self.login()
 
     def login(self):
@@ -262,21 +263,126 @@ class XUIClient:
             if r.json().get('success'):
                 logging.info(f"Logged in to {self.base_url}")
                 return True
+            self.last_error = f"Login failed: {r.text[:200]}"
         except Exception as e:
             logging.error(f"Login failed: {e}")
+            self.last_error = f"Login failed: {e}"
         return False
 
-    def add_client(self, email, limit_gb=0, expire_days=0):
-        list_url = f"{self.base_url}/panel/api/inbounds/get/{self.inbound_id}"
+    def _try_get_json(self, url):
         try:
-            r = self.session.get(list_url, verify=False)
-            if not r.json().get('success'):
+            r = self.session.get(url, verify=False, timeout=15)
+            return r.json()
+        except Exception:
+            return None
+
+    def _try_post_json(self, url, payload):
+        try:
+            r = self.session.post(url, json=payload, verify=False, timeout=15)
+            return r.json()
+        except Exception:
+            return None
+
+    def _inbound_get_urls(self, inbound_id):
+        return [
+            f"{self.base_url}/panel/api/inbounds/get/{inbound_id}",
+            f"{self.base_url}/xui/API/inbounds/get/{inbound_id}",
+            f"{self.base_url}/xui/api/inbounds/get/{inbound_id}",
+        ]
+
+    def _inbound_list_urls(self):
+        return [
+            f"{self.base_url}/panel/api/inbounds/list",
+            f"{self.base_url}/xui/API/inbounds/list",
+            f"{self.base_url}/xui/api/inbounds/list",
+        ]
+
+    def _inbound_add_urls(self):
+        return [
+            f"{self.base_url}/panel/api/inbounds/addClient",
+            f"{self.base_url}/xui/API/inbounds/addClient",
+            f"{self.base_url}/xui/api/inbounds/addClient",
+        ]
+
+    def _fetch_inbound(self, inbound_id):
+        for url in self._inbound_get_urls(inbound_id):
+            data = self._try_get_json(url)
+            if isinstance(data, dict) and data.get('success') and data.get('obj'):
+                return data.get('obj')
+        return None
+
+    def discover_preferred_inbound_id(self):
+        for url in self._inbound_list_urls():
+            data = self._try_get_json(url)
+            if not isinstance(data, dict) or not data.get('success'):
+                continue
+            inbounds = data.get('obj') or []
+            if not isinstance(inbounds, list) or not inbounds:
+                continue
+
+            vless_reality = []
+            vless_any = []
+            enabled_any = []
+
+            for ib in inbounds:
+                if not isinstance(ib, dict):
+                    continue
+                ib_id = ib.get('id')
+                if ib_id is None:
+                    continue
+                protocol = str(ib.get('protocol', '')).lower()
+                enabled = bool(ib.get('enable', True))
+                if enabled:
+                    enabled_any.append(ib)
+                if protocol == 'vless':
+                    vless_any.append(ib)
+                    try:
+                        ss = json.loads(ib.get('streamSettings', '{}'))
+                    except Exception:
+                        ss = {}
+                    if isinstance(ss, dict) and ss.get('realitySettings'):
+                        vless_reality.append(ib)
+
+            chosen = None
+            if vless_reality:
+                chosen = vless_reality[0]
+            elif vless_any:
+                chosen = vless_any[0]
+            elif enabled_any:
+                chosen = enabled_any[0]
+            else:
+                chosen = inbounds[0]
+
+            try:
+                return int(chosen.get('id'))
+            except Exception:
+                return self.inbound_id
+
+        return self.inbound_id
+
+    def add_client(self, email, limit_gb=0, expire_days=0):
+        try:
+            inbound = self._fetch_inbound(self.inbound_id)
+            if not inbound:
                 self.login()
-                r = self.session.get(list_url, verify=False)
-            
-            inbound = r.json()['obj']
-            settings = json.loads(inbound['settings'])
-            stream_settings = json.loads(inbound['streamSettings'])
+                inbound = self._fetch_inbound(self.inbound_id)
+
+            # Auto-detect inbound for newer/changed 3x-ui setups.
+            if not inbound:
+                detected_id = self.discover_preferred_inbound_id()
+                if detected_id != self.inbound_id:
+                    logging.info(f"Auto-switched inbound id from {self.inbound_id} to {detected_id} on {self.base_url}")
+                    self.inbound_id = detected_id
+                inbound = self._fetch_inbound(self.inbound_id)
+
+            if not inbound:
+                self.last_error = "Failed to load inbound (check inbound ID or API path compatibility)."
+                return None
+
+            try:
+                stream_settings = json.loads(inbound.get('streamSettings', '{}'))
+            except Exception:
+                stream_settings = {}
             
             new_uuid = str(uuid.uuid4())
             sub_id = ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(16))
@@ -286,43 +392,78 @@ class XUIClient:
                 import time
                 expiry_time = int((time.time() * 1000) + (expire_days * 86400 * 1000))
 
-            client_data = {
-                "id": self.inbound_id,
-                "settings": json.dumps({
-                    "clients": [{
-                        "id": new_uuid,
-                        "email": email,
-                        "flow": "xtls-rprx-vision",
-                        "totalGB": limit_gb * 1024 * 1024 * 1024,
-                        "expiryTime": expiry_time,
-                        "enable": True,
-                        "tgId": "",
-                        "subId": sub_id,
-                        "limitIp": 1
-                    }]
-                })
-            }
+            def build_payload(include_flow=True):
+                client_obj = {
+                    "id": new_uuid,
+                    "email": email,
+                    "totalGB": limit_gb * 1024 * 1024 * 1024,
+                    "expiryTime": expiry_time,
+                    "enable": True,
+                    "tgId": "",
+                    "subId": sub_id,
+                    "limitIp": 1
+                }
+                if include_flow:
+                    client_obj["flow"] = "xtls-rprx-vision"
+                return {
+                    "id": self.inbound_id,
+                    "settings": json.dumps({"clients": [client_obj]})
+                }
 
-            add_url = f"{self.base_url}/panel/api/inbounds/addClient"
-            r = self.session.post(add_url, json=client_data, verify=False)
-            
-            if r.json().get('success'):
-                reality = stream_settings['realitySettings']
-                pbk = reality['settings']['publicKey']
-                sni = reality['serverNames'][0]
-                sid = reality['shortIds'][0]
-                remark = email
-                ip = self.base_url.split('://')[1].split(':')[0]
-                port = inbound['port']
-                
+            # Try with flow first, then retry without flow for newer variants.
+            responses = []
+            add_success = False
+            for include_flow in (True, False):
+                payload = build_payload(include_flow=include_flow)
+                for add_url in self._inbound_add_urls():
+                    resp = self._try_post_json(add_url, payload)
+                    if resp:
+                        responses.append(resp)
+                    if isinstance(resp, dict) and resp.get('success'):
+                        add_success = True
+                        break
+                if add_success:
+                    break
+
+            if not add_success:
+                msg = ""
+                for resp in responses:
+                    if isinstance(resp, dict) and resp.get('msg'):
+                        msg = str(resp.get('msg'))
+                        break
+                self.last_error = msg or "Add client API rejected request."
+                return None
+
+            remark = email
+            ip = self.base_url.split('://')[1].split(':')[0]
+            port = inbound.get('port')
+
+            reality = stream_settings.get('realitySettings') if isinstance(stream_settings, dict) else None
+            pbk = sni = sid = None
+            if isinstance(reality, dict):
+                settings_obj = reality.get('settings')
+                if isinstance(settings_obj, str):
+                    try:
+                        settings_obj = json.loads(settings_obj)
+                    except Exception:
+                        settings_obj = None
+                if isinstance(settings_obj, dict):
+                    pbk = settings_obj.get('publicKey')
+                names = reality.get('serverNames') or []
+                shorts = reality.get('shortIds') or []
+                sni = names[0] if names else None
+                sid = shorts[0] if shorts else None
+
+            if pbk and sni and sid:
                 link = (f"vless://{new_uuid}@{ip}:{port}"
                         f"?type=tcp&security=reality&pbk={pbk}&fp=chrome"
                         f"&sni={sni}&sid={sid}&spx=%2F&flow=xtls-rprx-vision#{remark}")
-                return link
             else:
-                return None
+                link = f"vless://{new_uuid}@{ip}:{port}?type=tcp&security=none#{remark}"
+            return link
         except Exception as e:
             logging.error(f"XUI Client Error: {e}")
+            self.last_error = str(e)
             return None
 
     def delete_client_by_email(self, email):
@@ -832,6 +973,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "vpn_block_new_profiles": False,
                 "vpn_block_renewals": False
             }
+
+            # Try to auto-detect the most suitable inbound for this panel.
+            try:
+                probe_client = XUIClient(new_server)
+                detected_id = probe_client.discover_preferred_inbound_id()
+                new_server["inbound_id"] = int(detected_id)
+            except Exception:
+                pass
+
             # Reload the config just before writing to ensure we don't persist any
             # accidental in-memory changes.
             CONFIG = load_config()
@@ -872,6 +1022,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             created = []
             skipped = []
             failed = []
+            fail_reason = ""
 
             for i in range(1, count + 1):
                 username = f"{prefix}_{i}"
@@ -888,6 +1039,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     skipped.append(username)
                 else:
                     failed.append(username)
+                    if not fail_reason:
+                        fail_reason = client.last_error
 
             context.user_data['gen_type'] = None
             summary = (
@@ -914,6 +1067,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "❌ Failed users:\n" + "\n".join(failed),
                     parse_mode='HTML'
                 )
+                if fail_reason:
+                    await update.message.reply_text(
+                        f"⚠️ Failure reason: <code>{fail_reason}</code>",
+                        parse_mode='HTML'
+                    )
             return
         except Exception as e:
             await update.message.reply_text(
