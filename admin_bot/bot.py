@@ -664,9 +664,15 @@ class XUIClient:
                 self.last_error = "Failed to load inbound (check inbound ID or API path compatibility)."
                 return None
 
-            try:
-                stream_settings = json.loads(inbound.get('streamSettings', '{}'))
-            except Exception:
+            raw_stream_settings = inbound.get('streamSettings', '{}')
+            if isinstance(raw_stream_settings, str):
+                try:
+                    stream_settings = json.loads(raw_stream_settings)
+                except Exception:
+                    stream_settings = {}
+            elif isinstance(raw_stream_settings, dict):
+                stream_settings = raw_stream_settings
+            else:
                 stream_settings = {}
             
             new_uuid = str(uuid.uuid4())
@@ -711,6 +717,8 @@ class XUIClient:
                             settings_obj = None
                     if isinstance(settings_obj, dict):
                         pbk = settings_obj.get('publicKey')
+                    if not pbk:
+                        pbk = reality.get('publicKey')
                     names = reality.get('serverNames') or []
                     shorts = reality.get('shortIds') or []
                     sni = names[0] if names else None

@@ -5,7 +5,7 @@ import secrets
 import string
 import requests
 import asyncio
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 import telegram
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
@@ -464,6 +464,52 @@ class XUIClient:
             logging.error(f"Error checking stats: {e}")
             return None
 
+    def get_client_stats_by_email(self, target_email):
+        """Find a client by email and return stats (up, down, total, expiry)."""
+        try:
+            inbounds = self._fetch_inbounds_list()
+            for inbound in inbounds:
+                raw_settings = inbound.get('settings', '{}')
+                if isinstance(raw_settings, str):
+                    try:
+                        settings = json.loads(raw_settings)
+                    except Exception:
+                        settings = {'clients': []}
+                elif isinstance(raw_settings, dict):
+                    settings = raw_settings
+                else:
+                    settings = {'clients': []}
+
+                target_client = None
+                for client in settings.get('clients', []):
+                    if str(client.get('email', '')) == str(target_email):
+                        target_client = client
+                        break
+
+                if target_client:
+                    up = target_client.get('up', 0)
+                    down = target_client.get('down', 0)
+                    client_stats = inbound.get('clientStats')
+                    if client_stats:
+                        for stat in client_stats:
+                            if stat.get('email') == target_client.get('email'):
+                                up = stat.get('up', 0)
+                                down = stat.get('down', 0)
+                                break
+
+                    return {
+                        "email": target_client.get('email', ''),
+                        "up": up,
+                        "down": down,
+                        "total": target_client.get('totalGB', 0),
+                        "expiry": target_client.get('expiryTime', 0),
+                        "enable": target_client.get('enable', True)
+                    }
+            return None
+        except Exception as e:
+            logging.error(f"Error checking stats by email: {e}")
+            return None
+
     def add_client(self, email, limit_gb=0, expire_days=0):
         # Validate panel URL
         if "vless://" in self.base_url:
@@ -805,6 +851,50 @@ def find_client_by_uuid(target_uuid: str):
         except Exception:
             continue
     return None, None, None
+
+
+def find_client_by_email(target_email: str):
+    """Search every server for a client by email/remark."""
+    if not target_email:
+        return None, None, None
+    refresh_runtime_config()
+    for server in SERVERS:
+        try:
+            client = XUIClient(server)
+            stats = client.get_client_stats_by_email(target_email)
+            if stats:
+                return server, client, stats['email']
+        except Exception:
+            continue
+    return None, None, None
+
+
+def parse_vless_identifiers(link_text: str):
+    text = str(link_text or '').strip()
+    uuid_val = None
+    email_val = None
+
+    m = re.search(r'vless://([A-Fa-f0-9\-]+)@', text)
+    if m:
+        uuid_val = m.group(1)
+
+    if '#' in text:
+        email_val = unquote(text.split('#', 1)[1]).strip()
+
+    return uuid_val, email_val
+
+
+def find_client_from_vless(link_text: str):
+    uuid_val, email_val = parse_vless_identifiers(link_text)
+    if uuid_val:
+        s, c, e = find_client_by_uuid(uuid_val)
+        if s:
+            return s, c, e, uuid_val
+    if email_val:
+        s, c, e = find_client_by_email(email_val)
+        if s:
+            return s, c, e, uuid_val
+    return None, None, None, uuid_val
 
 
 async def cleanup_expired_trials(application: Application):
@@ -1820,14 +1910,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         status_msg = await update.message.reply_text("🔍 Key စစ်ဆေးနေပါသည်...", parse_mode='HTML')
-        import re
-        match = re.search(r'vless://([a-f0-9\-]+)@', text)
-        if not match:
+        target_uuid, target_email = parse_vless_identifiers(text)
+        if not target_uuid and not target_email:
             await status_msg.edit_text("❌ Key ပုံစံ မမှန်ကန်ပါ (UUID မတွေ့ရပါ)။")
             return
 
-        target_uuid = match.group(1)
-        server_obj, xui, email = find_client_by_uuid(target_uuid)
+        server_obj, xui, email, resolved_uuid = find_client_from_vless(text)
+        target_uuid = resolved_uuid or target_uuid
 
         if not server_obj:
             await status_msg.edit_text(
@@ -1875,14 +1964,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data['gen_type'] = None
         status_msg = await update.message.reply_text("🔍 Searching...", parse_mode='HTML')
-        import re
-        match = re.search(r'vless://([a-f0-9\-]+)@', text)
-        if not match:
+        target_uuid, target_email = parse_vless_identifiers(text)
+        if not target_uuid and not target_email:
             await status_msg.edit_text("❌ Invalid key format (UUID not found).")
             return
 
-        target_uuid = match.group(1)
-        server_obj, xui, email = find_client_by_uuid(target_uuid)
+        server_obj, xui, email, resolved_uuid = find_client_from_vless(text)
+        target_uuid = resolved_uuid or target_uuid
 
         if not xui:
             await status_msg.edit_text("❌ Key not found on any server.")
@@ -1915,13 +2003,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Extract UUID
         try:
             # Format: vless://UUID@...
-            import re
-            match = re.search(r'vless://([a-f0-9\-]+)@', text)
-            if not match:
+            target_uuid, target_email = parse_vless_identifiers(text)
+            if not target_uuid and not target_email:
                 await status_msg.edit_text("❌ Key ပုံစံမှားယွင်းနေပါသည်။")
                 return
-            
-            target_uuid = match.group(1)
+
             found = False
             
             # Scan all servers
@@ -1931,7 +2017,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     client = XUIClient(s)
                     # We need to manually add get_client_stats here if it's missing in older cached version
                     # But assuming XUIClient has it now
-                    stats = client.get_client_stats(target_uuid)
+                    stats = client.get_client_stats(target_uuid) if target_uuid else None
+                    if not stats and target_email:
+                        stats = client.get_client_stats_by_email(target_email)
                     
                     if stats:
                         found = True
