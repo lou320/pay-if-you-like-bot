@@ -809,7 +809,26 @@ class XUIClient:
                         client_obj["flow"] = "xtls-rprx-vision"
 
                     new_clients = clients + [client_obj]
-                    settings_str = json.dumps({"clients": new_clients})
+
+                    # Keep existing inbound settings fields (especially VLESS
+                    # decryption/encryption) and only update clients list.
+                    raw_existing_settings = inbound.get('settings', '{}')
+                    if isinstance(raw_existing_settings, str):
+                        try:
+                            existing_settings_obj = json.loads(raw_existing_settings)
+                        except Exception:
+                            existing_settings_obj = {}
+                    elif isinstance(raw_existing_settings, dict):
+                        existing_settings_obj = dict(raw_existing_settings)
+                    else:
+                        existing_settings_obj = {}
+
+                    existing_settings_obj['clients'] = new_clients
+                    if str(inbound.get('protocol', '')).lower() == 'vless':
+                        existing_settings_obj.setdefault('decryption', 'none')
+                        existing_settings_obj.setdefault('encryption', 'none')
+
+                    settings_str = json.dumps(existing_settings_obj)
                     payload_min = {
                         "id": self.inbound_id,
                         "settings": settings_str,
