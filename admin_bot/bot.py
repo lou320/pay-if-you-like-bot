@@ -460,6 +460,36 @@ class XUIClient:
 
         return self.inbound_id
 
+    def list_inbounds_brief(self):
+        for url in self._inbound_list_urls():
+            data = self._try_get_json(url)
+            if not isinstance(data, dict) or not data.get('success'):
+                continue
+
+            inbounds = data.get('obj') or []
+            if not isinstance(inbounds, list):
+                continue
+
+            rows = []
+            for ib in inbounds:
+                if not isinstance(ib, dict):
+                    continue
+                try:
+                    iid = int(ib.get('id'))
+                except Exception:
+                    continue
+                rows.append({
+                    'id': iid,
+                    'remark': str(ib.get('remark', f'Inbound {iid}')),
+                    'protocol': str(ib.get('protocol', 'unknown')),
+                    'port': ib.get('port', '?'),
+                    'enable': bool(ib.get('enable', True)),
+                })
+            return rows
+
+        self.last_error = self.last_error or "Failed to list inbounds from server API."
+        return []
+
     def create_auto_inbound(self, remark: str = "Auto-Inbound", port: int = 443):
         base = copy.deepcopy(AUTO_INBOUND_TEMPLATE)
         base["remark"] = remark
@@ -803,6 +833,7 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton(block_renew_txt, callback_data=f'toggle_vpn_renew_{idx}')])
 
         keyboard.append([InlineKeyboardButton("🧩 Create Inbound Auto", callback_data=f'create_inb_{idx}')])
+        keyboard.append([InlineKeyboardButton("🔄 Sync Existing Inbound", callback_data=f'sync_inb_{idx}')])
             
         # Delete
         keyboard.append([InlineKeyboardButton("🗑 Delete Server", callback_data=f'del_srv_{idx}')])
@@ -936,6 +967,75 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"✅ Inbound created on <b>{s.get('name')}</b>.\n"
             f"🆔 Inbound ID set to: <b>{detected_id}</b>",
+            parse_mode='HTML'
+        )
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data=f'manage_srv_{idx}')]]
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    elif query.data.startswith('sync_inb_'):
+        idx = int(query.data.split('_')[-1])
+        CONFIG = load_config()
+        SERVERS = CONFIG['servers']
+
+        if idx >= len(SERVERS):
+            await query.edit_message_text("❌ Server not found.")
+            return
+
+        s = SERVERS[idx]
+        client = XUIClient(s)
+        inbounds = client.list_inbounds_brief()
+
+        if not inbounds:
+            await query.edit_message_text(
+                f"❌ Failed to load inbound list from <b>{s.get('name')}</b>.\n\n"
+                f"Reason: <code>{client.last_error or 'No inbound data returned.'}</code>",
+                parse_mode='HTML'
+            )
+            keyboard = [[InlineKeyboardButton("🔙 Back", callback_data=f'manage_srv_{idx}')]]
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+
+        current_id = int(s.get('inbound_id', 0) or 0)
+        keyboard = []
+        for ib in inbounds:
+            marker = "⭐" if ib['id'] == current_id else ""
+            status = "🟢" if ib['enable'] else "🔴"
+            text = f"{status} ID {ib['id']} | {ib['protocol']}:{ib['port']} | {ib['remark']} {marker}".strip()
+            keyboard.append([InlineKeyboardButton(text, callback_data=f"set_inb_{idx}_{ib['id']}")])
+
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f'manage_srv_{idx}')])
+        await query.edit_message_text(
+            f"🔄 <b>Select Existing Inbound For {s.get('name')}</b>\n"
+            f"Current inbound_id: <b>{current_id}</b>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    elif query.data.startswith('set_inb_'):
+        parts = query.data.split('_')
+        if len(parts) != 4:
+            await query.edit_message_text("❌ Invalid inbound selection.")
+            return
+        idx = int(parts[2])
+        inbound_id = int(parts[3])
+
+        CONFIG = load_config()
+        SERVERS = CONFIG['servers']
+        if idx >= len(SERVERS):
+            await query.edit_message_text("❌ Server not found.")
+            return
+
+        s = SERVERS[idx]
+        s['inbound_id'] = inbound_id
+        SERVERS[idx] = s
+        CONFIG['servers'] = SERVERS
+        with open('../config.json', 'w') as f:
+            json.dump(CONFIG, f, indent=4)
+
+        await query.edit_message_text(
+            f"✅ Updated <b>{s.get('name')}</b> inbound_id to <b>{inbound_id}</b>.",
             parse_mode='HTML'
         )
         keyboard = [[InlineKeyboardButton("🔙 Back", callback_data=f'manage_srv_{idx}')]]
