@@ -367,6 +367,8 @@ class XUIClient:
             f"{self.base_url}/xui/API/inbounds/get/{inbound_id}",
             f"{self.base_url}/xui/api/inbounds/get/{inbound_id}",
             f"{self.base_url}/api/inbounds/get/{inbound_id}",
+            f"{self.base_url}/panel/inbound/get/{inbound_id}",
+            f"{self.base_url}/xui/inbound/get/{inbound_id}",
         ]
 
     def _inbound_list_urls(self):
@@ -375,6 +377,8 @@ class XUIClient:
             f"{self.base_url}/xui/API/inbounds/list",
             f"{self.base_url}/xui/api/inbounds/list",
             f"{self.base_url}/api/inbounds/list",
+            f"{self.base_url}/panel/inbound/list",
+            f"{self.base_url}/xui/inbound/list",
         ]
 
     def _inbound_add_urls(self):
@@ -383,6 +387,8 @@ class XUIClient:
             f"{self.base_url}/xui/API/inbounds/addClient",
             f"{self.base_url}/xui/api/inbounds/addClient",
             f"{self.base_url}/api/inbounds/addClient",
+            f"{self.base_url}/panel/inbound/addClient",
+            f"{self.base_url}/xui/inbound/addClient",
         ]
 
     def _inbound_create_urls(self):
@@ -393,6 +399,9 @@ class XUIClient:
             f"{self.base_url}/api/inbounds/add",
             f"{self.base_url}/panel/inbound/add",
             f"{self.base_url}/inbound/add",
+            f"{self.base_url}/xui/inbound/add",
+            f"{self.base_url}/xui/inbounds/add",
+            f"{self.base_url}/panel/inbounds/add",
         ]
 
     def _fetch_inbound(self, inbound_id):
