@@ -701,6 +701,30 @@ class XUIClient:
                     "settings": json.dumps({"clients": [client_obj]})
                 }
 
+            def parse_clients_from_inbound(inbound_obj):
+                raw_settings = inbound_obj.get('settings', '{}') if isinstance(inbound_obj, dict) else '{}'
+                if isinstance(raw_settings, str):
+                    try:
+                        settings_obj = json.loads(raw_settings)
+                    except Exception:
+                        settings_obj = {}
+                elif isinstance(raw_settings, dict):
+                    settings_obj = raw_settings
+                else:
+                    settings_obj = {}
+                return settings_obj.get('clients') or []
+
+            def client_exists(client_email, client_uuid=None):
+                fresh = self._fetch_inbound(self.inbound_id)
+                if not fresh:
+                    return False
+                for c in parse_clients_from_inbound(fresh):
+                    if str(c.get('email', '')) == str(client_email):
+                        if client_uuid and str(c.get('id', '')) != str(client_uuid):
+                            continue
+                        return True
+                return False
+
             def build_link_for_uuid(client_uuid):
                 remark = email
                 ip = self.base_url.split('://')[1].split(':')[0]
@@ -751,16 +775,18 @@ class XUIClient:
                     if resp:
                         responses.append(resp)
                     if isinstance(resp, dict) and resp.get('success'):
-                        add_success = True
-                        break
+                        if client_exists(email, new_uuid):
+                            add_success = True
+                            break
 
                     # Some panels accept addClient as form body only.
                     resp = self._try_post_form(add_url, payload)
                     if resp:
                         responses.append(resp)
                     if isinstance(resp, dict) and resp.get('success'):
-                        add_success = True
-                        break
+                        if client_exists(email, new_uuid):
+                            add_success = True
+                            break
                 if add_success:
                     break
 
@@ -824,6 +850,10 @@ class XUIClient:
                             msg = str(resp.get('msg'))
                             break
                     self.last_error = msg or self.last_error or "Add client API rejected request."
+                    return None
+
+                if not client_exists(email, new_uuid):
+                    self.last_error = "Client update reported success but client was not persisted."
                     return None
 
             return build_link_for_uuid(new_uuid)
