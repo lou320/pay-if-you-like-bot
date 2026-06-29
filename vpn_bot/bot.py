@@ -17,6 +17,17 @@ def load_config():
     with open('../config.json', 'r') as f:
         return json.load(f)
 
+
+def refresh_runtime_config():
+    global CONFIG, SERVERS, ADMIN_IDS
+    try:
+        fresh = load_config()
+        CONFIG = fresh
+        SERVERS = fresh.get('servers', [])
+        ADMIN_IDS = fresh.get('admin_ids', ADMIN_IDS)
+    except Exception as e:
+        logging.warning(f"Failed to refresh config: {e}")
+
 CONFIG = load_config()
 SERVERS = CONFIG['servers']
 ADMIN_IDS = CONFIG['admin_ids']
@@ -101,8 +112,34 @@ def format_plan_for_user(plan: dict):
 
 def get_active_servers():
     """Use enabled servers only; fall back to all servers if none are explicitly enabled."""
+    refresh_runtime_config()
     enabled = [s for s in SERVERS if s.get('enabled', True)]
     return enabled if enabled else SERVERS
+
+
+def get_profile_generation_servers():
+    """Servers eligible for creating new profiles in vpn_bot."""
+    active = get_active_servers()
+    eligible = [s for s in active if not s.get('vpn_block_new_profiles', False)]
+    return eligible
+
+
+def get_vpn_status_servers():
+    """Servers included in vpn_bot status checks.
+
+    If at least one server is marked vpn_status_scope=True, only those are checked.
+    Otherwise all active servers are checked.
+    """
+    active = get_active_servers()
+    scoped = [s for s in active if s.get('vpn_status_scope', False)]
+    return scoped if scoped else active
+
+
+def find_server_by_name(name: str):
+    for s in SERVERS:
+        if s.get('name') == name:
+            return s
+    return None
 
 
 def load_rotation_state():
@@ -160,7 +197,7 @@ def get_server_active_client_count(server):
 
 def get_round_robin_servers():
     """Return active servers ordered by least load with round-robin tie-breaks."""
-    servers = get_active_servers()
+    servers = get_profile_generation_servers()
     if not servers:
         return []
 
@@ -700,6 +737,7 @@ def save_trial_tracking(data):
 def find_client_by_uuid(target_uuid: str):
     """Search every server for a client UUID.
     Returns (server_config, XUIClient_instance, email) or (None, None, None)."""
+    refresh_runtime_config()
     for server in SERVERS:
         try:
             client = XUIClient(server)
@@ -964,6 +1002,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global CONFIG, SERVERS
+    refresh_runtime_config()
     query = update.callback_query
     await query.answer()
     
@@ -1018,6 +1057,25 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         renew_days   = int(pending.get('total_days', 30))
         renew_gb     = int(pending.get('total_gb', 100))
 
+        server_for_renew = find_server_by_name(server_name)
+        if server_for_renew and server_for_renew.get('vpn_block_renewals', False):
+            context.bot_data.get('renew_pending', {}).pop(str(user_id), None)
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "⛔ <b>Renewal is disabled for this server.</b>\n\n"
+                    f"🖥 <b>Server:</b> {server_name}\n"
+                    "Please contact admin to migrate or support your account."
+                ),
+                parse_mode='HTML',
+                reply_markup=MAIN_MENU_KB
+            )
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"⚠️ Renewal blocked by server policy for user {user_id} on {server_name}."
+            )
+            return
+
         # Find the right server and extend
         success = False
         expiry_date = ''
@@ -1038,6 +1096,8 @@ async def approval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Fallback: try other servers if name didn't match or failed
         if not success:
             server_obj, xui, resolved_email = find_client_by_uuid(target_uuid)
+            if server_obj and server_obj.get('vpn_block_renewals', False):
+                xui = None
             if xui:
                 success, expiry_date = xui.reset_and_extend_client(
                     target_uuid,
@@ -1572,6 +1632,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global CONFIG, SERVERS
+    refresh_runtime_config()
     query = update.callback_query
     await query.answer()
     
@@ -1588,8 +1649,21 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Step 2: Show Server List
         keyboard = []
         for i, s in enumerate(SERVERS):
+            if not s.get('enabled', True):
+                continue
+            if s.get('vpn_block_new_profiles', False):
+                continue
             name = s.get('name', f"Server {i+1}")
             keyboard.append([InlineKeyboardButton(f"🖥 {name}", callback_data=f'admin_sel_srv_{i}')])
+
+        if not keyboard:
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data='admin_back')])
+            await query.edit_message_text(
+                "⛔ No eligible server available for creating new profiles in vpn_bot.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
         
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data='admin_cancel')])
         await query.edit_message_text("👉 <b>Select Server:</b>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1641,16 +1715,19 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif query.data == 'admin_status':
-        # Check all servers
+        # Check scoped servers for vpn_bot status
         msg = "🖥️ <b>Server Status:</b>\n\n"
-        for idx, s in enumerate(SERVERS):
+        status_servers = get_vpn_status_servers()
+        if not status_servers:
+            msg += "No server selected for status monitoring."
+        for idx, s in enumerate(status_servers):
             try:
                 # Simple reachability check (login)
                 client = XUIClient(s)
                 status = "✅ Online"
             except:
                 status = "❌ Offline"
-            msg += f"Server {idx+1}: {status}\n"
+            msg += f"{s.get('name', f'Server {idx+1}')}: {status}\n"
         
         keyboard = [[InlineKeyboardButton("🔙 Back", callback_data='admin_back')]]
         await query.edit_message_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1666,6 +1743,7 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global CONFIG, SERVERS
+    refresh_runtime_config()
     text = update.message.text.strip()
 
     # Check for "Back to Start" button
@@ -1697,6 +1775,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text(
                 "❌ ဤ Key ကို Server ပေါ်တွင် မတွေ့ရှိပါ။\n"
                 "Key မှန်မှန်ကန်ကန် ထည့်ပေးပါ သို့မဟုတ် Admin ကိုဆက်သွယ်ပါ။"
+            )
+            return
+
+        if server_obj.get('vpn_block_renewals', False):
+            await status_msg.edit_text(
+                "⛔ Renewal is currently disabled for this server.\n"
+                f"Server: {server_obj.get('name', 'Unknown')}\n"
+                "Please contact admin.",
+                parse_mode='HTML'
             )
             return
 
@@ -1902,6 +1989,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Use selected server
             server_idx = context.user_data.get('gen_server_idx', 0)
             target_server = SERVERS[server_idx] if server_idx < len(SERVERS) else SERVERS[0]
+
+            if target_server.get('vpn_block_new_profiles', False):
+                await status_msg.edit_text(
+                    f"⛔ New profile creation is blocked on {target_server.get('name')}."
+                )
+                return
             
             client = XUIClient(target_server)
             result = client.add_client(email=username, limit_gb=limit_gb, expire_days=days)

@@ -388,6 +388,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("➕ Generate 1 Month Key", callback_data='admin_gen_1m')],
         [InlineKeyboardButton("⚡️ Generate Trial Key", callback_data='admin_gen_trial')],
+        [InlineKeyboardButton("📦 Bulk Generate Users", callback_data='admin_bulk_gen')],
         [InlineKeyboardButton("🧊 Inactive Users", callback_data='admin_inactive_users')],
         [InlineKeyboardButton("⚙️ Manage Servers", callback_data='admin_manage_menu')],
         [InlineKeyboardButton("🔌 Add New Server", callback_data='admin_add_server')]
@@ -457,6 +458,9 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         default_idx = CONFIG.get('default_server_id', 0)
         is_default = (idx == default_idx)
         is_enabled = s.get('enabled', True)
+        vpn_status_scope = s.get('vpn_status_scope', False)
+        vpn_block_new_profiles = s.get('vpn_block_new_profiles', False)
+        vpn_block_renewals = s.get('vpn_block_renewals', False)
         
         # Details
         msg = (
@@ -464,6 +468,9 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔗 <b>URL:</b> <code>{s.get('panel_url')}</code>\n"
             f"🔌 <b>Status:</b> {'✅ Enabled' if is_enabled else '❌ Disabled'}\n"
             f"⭐️ <b>Priority:</b> {'High (Default)' if is_default else 'Normal'}\n"
+            f"📊 <b>VPN Status Scope:</b> {'✅ Included' if vpn_status_scope else '➖ Not Included'}\n"
+            f"🆕 <b>VPN New Profiles:</b> {'⛔ Blocked' if vpn_block_new_profiles else '✅ Allowed'}\n"
+            f"🔄 <b>VPN Renewals:</b> {'⛔ Blocked' if vpn_block_renewals else '✅ Allowed'}\n"
         )
         
         # Actions
@@ -476,6 +483,15 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Set Default
         if not is_default:
             keyboard.append([InlineKeyboardButton("⭐️ Set as Default", callback_data=f'set_def_{idx}')])
+
+        scope_txt = "📊 Remove from VPN Status" if vpn_status_scope else "📊 Include in VPN Status"
+        keyboard.append([InlineKeyboardButton(scope_txt, callback_data=f'toggle_scope_{idx}')])
+
+        block_new_txt = "🆕 Allow VPN New Profiles" if vpn_block_new_profiles else "🆕 Block VPN New Profiles"
+        keyboard.append([InlineKeyboardButton(block_new_txt, callback_data=f'toggle_vpn_new_{idx}')])
+
+        block_renew_txt = "🔄 Allow VPN Renewals" if vpn_block_renewals else "🔄 Block VPN Renewals"
+        keyboard.append([InlineKeyboardButton(block_renew_txt, callback_data=f'toggle_vpn_renew_{idx}')])
             
         # Delete
         keyboard.append([InlineKeyboardButton("🗑 Delete Server", callback_data=f'del_srv_{idx}')])
@@ -510,6 +526,66 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open('../config.json', 'w') as f:
             json.dump(CONFIG, f, indent=4)
         
+        query.data = f'manage_srv_{idx}'
+        await admin_handler(update, context)
+        return
+
+    elif query.data.startswith('toggle_scope_'):
+        idx = int(query.data.split('_')[-1])
+        CONFIG = load_config()
+        SERVERS = CONFIG['servers']
+
+        if idx >= len(SERVERS):
+            await query.edit_message_text("❌ Server not found.")
+            return
+
+        s = SERVERS[idx]
+        s['vpn_status_scope'] = not bool(s.get('vpn_status_scope', False))
+        SERVERS[idx] = s
+        CONFIG['servers'] = SERVERS
+        with open('../config.json', 'w') as f:
+            json.dump(CONFIG, f, indent=4)
+
+        query.data = f'manage_srv_{idx}'
+        await admin_handler(update, context)
+        return
+
+    elif query.data.startswith('toggle_vpn_new_'):
+        idx = int(query.data.split('_')[-1])
+        CONFIG = load_config()
+        SERVERS = CONFIG['servers']
+
+        if idx >= len(SERVERS):
+            await query.edit_message_text("❌ Server not found.")
+            return
+
+        s = SERVERS[idx]
+        s['vpn_block_new_profiles'] = not bool(s.get('vpn_block_new_profiles', False))
+        SERVERS[idx] = s
+        CONFIG['servers'] = SERVERS
+        with open('../config.json', 'w') as f:
+            json.dump(CONFIG, f, indent=4)
+
+        query.data = f'manage_srv_{idx}'
+        await admin_handler(update, context)
+        return
+
+    elif query.data.startswith('toggle_vpn_renew_'):
+        idx = int(query.data.split('_')[-1])
+        CONFIG = load_config()
+        SERVERS = CONFIG['servers']
+
+        if idx >= len(SERVERS):
+            await query.edit_message_text("❌ Server not found.")
+            return
+
+        s = SERVERS[idx]
+        s['vpn_block_renewals'] = not bool(s.get('vpn_block_renewals', False))
+        SERVERS[idx] = s
+        CONFIG['servers'] = SERVERS
+        with open('../config.json', 'w') as f:
+            json.dump(CONFIG, f, indent=4)
+
         query.data = f'manage_srv_{idx}'
         await admin_handler(update, context)
         return
@@ -562,6 +638,34 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton(f"🖥 {ip_label}", callback_data=f'admin_sel_srv_{i}')])
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data='admin_cancel')])
         await query.edit_message_text("👉 <b>Select Server:</b>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    elif query.data == 'admin_bulk_gen':
+        keyboard = []
+        for i, s in enumerate(SERVERS):
+            try:
+                ip_label = s.get('panel_url').split('://')[1].split(':')[0]
+            except:
+                ip_label = s.get('name', f"Server {i+1}")
+            keyboard.append([InlineKeyboardButton(f"🖥 {ip_label}", callback_data=f'admin_bulk_sel_srv_{i}')])
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data='admin_cancel')])
+        await query.edit_message_text("👉 <b>Select Server For Bulk Creation:</b>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    elif query.data.startswith('admin_bulk_sel_srv_'):
+        idx = int(query.data.split('_')[-1])
+        context.user_data['gen_server_idx'] = idx
+        context.user_data['gen_type'] = 'bulk_generate'
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='admin_cancel')]]
+        await query.edit_message_text(
+            "📦 <b>Bulk Generate Users</b>\n\n"
+            "Reply with this format:\n"
+            "<code>prefix|count|gb|days</code>\n\n"
+            "Example:\n"
+            "<code>teamA|5|200|30</code>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
 
     elif query.data.startswith('admin_sel_srv_'):
@@ -723,7 +827,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "password": pwd.strip(),
                 "inbound_id": int(str(iid).strip()),
                 "flow_limit_gb": 100,
-                "expire_days": 30
+                "expire_days": 30,
+                "vpn_status_scope": False,
+                "vpn_block_new_profiles": False,
+                "vpn_block_renewals": False
             }
             # Reload the config just before writing to ensure we don't persist any
             # accidental in-memory changes.
@@ -739,6 +846,82 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         except Exception as e:
             await update.message.reply_text(f"❌ Invalid Format: {e}")
+            return
+
+    if context.user_data.get('gen_type') == 'bulk_generate':
+        raw = update.message.text.strip()
+        try:
+            prefix, count_raw, gb_raw, days_raw = [x.strip() for x in raw.split('|')]
+            count = int(count_raw)
+            limit_gb = int(gb_raw)
+            expire_days = int(days_raw)
+            if count <= 0 or count > 30:
+                raise ValueError("count must be between 1 and 30")
+            if limit_gb <= 0:
+                raise ValueError("gb must be greater than 0")
+            if expire_days <= 0:
+                raise ValueError("days must be greater than 0")
+            if not prefix:
+                raise ValueError("prefix cannot be empty")
+
+            server_idx = context.user_data.get('gen_server_idx', CONFIG.get('default_server_id', 0))
+            target_server = SERVERS[server_idx] if server_idx < len(SERVERS) else SERVERS[0]
+            status_msg = await update.message.reply_text("⚙️ Generating bulk users...")
+
+            client = XUIClient(target_server)
+            created = []
+            skipped = []
+            failed = []
+
+            for i in range(1, count + 1):
+                username = f"{prefix}_{i}"
+                result = client.add_client(email=username, limit_gb=limit_gb, expire_days=expire_days)
+                if isinstance(result, tuple):
+                    link, existed = result
+                else:
+                    link = result
+                    existed = False
+
+                if link and not existed:
+                    created.append((username, link))
+                elif link and existed:
+                    skipped.append(username)
+                else:
+                    failed.append(username)
+
+            context.user_data['gen_type'] = None
+            summary = (
+                f"✅ <b>Bulk Generation Finished</b>\n\n"
+                f"🖥 Server: {target_server.get('name')}\n"
+                f"📦 Requested: {count}\n"
+                f"✅ Created: {len(created)}\n"
+                f"⚠️ Duplicate: {len(skipped)}\n"
+                f"❌ Failed: {len(failed)}\n"
+                f"📊 Plan: {limit_gb} GB / {expire_days} days"
+            )
+            await status_msg.edit_text(summary, parse_mode='HTML')
+
+            if created:
+                lines = [f"{name}:\n<code>{link}</code>" for name, link in created]
+                await update.message.reply_text("\n\n".join(lines), parse_mode='HTML')
+            if skipped:
+                await update.message.reply_text(
+                    "⚠️ Duplicate users skipped:\n" + "\n".join(skipped),
+                    parse_mode='HTML'
+                )
+            if failed:
+                await update.message.reply_text(
+                    "❌ Failed users:\n" + "\n".join(failed),
+                    parse_mode='HTML'
+                )
+            return
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Invalid bulk format: {e}\n\n"
+                "Use: <code>prefix|count|gb|days</code>\n"
+                "Example: <code>teamA|5|200|30</code>",
+                parse_mode='HTML'
+            )
             return
 
     # Check if waiting for username
