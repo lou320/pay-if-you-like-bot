@@ -884,51 +884,103 @@ class XUIClient:
     def delete_client_by_email(self, email):
         """Delete one client from this inbound by email."""
         try:
-            list_url = f"{self.base_url}/panel/api/inbounds/get/{self.inbound_id}"
-            r = self.session.get(list_url, verify=False, timeout=15)
-            rj = r.json()
-
-            if not rj.get('success'):
+            inbound = self._fetch_inbound(self.inbound_id)
+            if not inbound:
                 self.login()
-                r = self.session.get(list_url, verify=False, timeout=15)
-                rj = r.json()
+                inbound = self._fetch_inbound(self.inbound_id)
 
-            if not rj.get('success'):
-                logging.error(f"Delete failed to fetch inbound: {rj}")
+            if not inbound:
+                logging.error(f"Delete failed to fetch inbound for id={self.inbound_id}")
                 return False
 
-            inbound = rj.get('obj', {})
-            settings = json.loads(inbound.get('settings', '{}'))
-            clients = settings.get('clients', [])
+            raw_settings = inbound.get('settings', '{}')
+            if isinstance(raw_settings, str):
+                try:
+                    settings_obj = json.loads(raw_settings)
+                except Exception:
+                    settings_obj = {}
+            elif isinstance(raw_settings, dict):
+                settings_obj = dict(raw_settings)
+            else:
+                settings_obj = {}
 
-            original_count = len(clients)
-            settings['clients'] = [c for c in clients if c.get('email') != email]
-            if len(settings['clients']) == original_count:
+            clients = list(settings_obj.get('clients') or [])
+            kept_clients = [c for c in clients if str(c.get('email', '')) != str(email)]
+            if len(kept_clients) == len(clients):
                 logging.warning(f"Client not found for delete: {email}")
                 return False
 
-            payload = {
+            settings_obj['clients'] = kept_clients
+            if str(inbound.get('protocol', '')).lower() == 'vless':
+                settings_obj.setdefault('decryption', 'none')
+                settings_obj.setdefault('encryption', 'none')
+
+            settings_str = json.dumps(settings_obj)
+
+            payload_min = {
                 "id": self.inbound_id,
-                "settings": json.dumps(settings)
+                "settings": settings_str,
             }
-            candidate_urls = [
-                f"{self.base_url}/panel/api/inbounds/update/{self.inbound_id}",
-                f"{self.base_url}/panel/api/inbounds/{self.inbound_id}",
-            ]
+            payload_full = {
+                "id": self.inbound_id,
+                "up": inbound.get('up', 0),
+                "down": inbound.get('down', 0),
+                "total": inbound.get('total', 0),
+                "remark": inbound.get('remark', ''),
+                "enable": inbound.get('enable', True),
+                "expiryTime": inbound.get('expiryTime', 0),
+                "listen": inbound.get('listen', ''),
+                "port": inbound.get('port', 0),
+                "protocol": inbound.get('protocol', 'vless'),
+                "settings": settings_str,
+                "streamSettings": inbound.get('streamSettings', '{}'),
+                "sniffing": inbound.get('sniffing', '{}'),
+                "allocate": inbound.get('allocate', '{"strategy":"always","refresh":5,"concurrency":3}'),
+                "tag": inbound.get('tag', f"in-{inbound.get('port', 0)}-tcp"),
+            }
 
-            for update_url in candidate_urls:
+            updated = False
+            for update_url in self._inbound_update_urls(self.inbound_id):
+                for payload in (payload_min, payload_full):
+                    resp = self._try_post_json(update_url, payload)
+                    if isinstance(resp, dict) and resp.get('success'):
+                        updated = True
+                        break
+                    resp = self._try_post_form(update_url, payload)
+                    if isinstance(resp, dict) and resp.get('success'):
+                        updated = True
+                        break
+                if updated:
+                    break
+
+            if not updated:
+                logging.error(f"Delete update failed for {email} on all safe endpoints")
+                return False
+
+            # Verify target user is removed and inbound is still healthy.
+            fresh = self._fetch_inbound(self.inbound_id)
+            if not fresh:
+                logging.error("Delete verification failed: inbound missing after update")
+                return False
+
+            verify_settings_raw = fresh.get('settings', '{}')
+            if isinstance(verify_settings_raw, str):
                 try:
-                    r = self.session.post(update_url, json=payload, verify=False, timeout=15)
-                    resp = r.json()
+                    verify_settings = json.loads(verify_settings_raw)
                 except Exception:
-                    continue
+                    verify_settings = {}
+            elif isinstance(verify_settings_raw, dict):
+                verify_settings = verify_settings_raw
+            else:
+                verify_settings = {}
 
-                if resp.get('success'):
-                    logging.info(f"Deleted client {email} from {self.base_url}")
-                    return True
+            for c in (verify_settings.get('clients') or []):
+                if str(c.get('email', '')) == str(email):
+                    logging.error("Delete verification failed: target client still exists")
+                    return False
 
-            logging.error(f"Delete update failed for {email} on all endpoints")
-            return False
+            logging.info(f"Deleted client {email} from {self.base_url} (inbound {self.inbound_id})")
+            return True
         except Exception as e:
             logging.error(f"delete_client_by_email exception: {e}")
             return False
